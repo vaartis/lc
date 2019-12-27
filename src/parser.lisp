@@ -1,7 +1,7 @@
 (defpackage lc.parser
   (:use :cl)
   (:shadow :get :symbol)
-  (:export :parse-file :parse-type
+  (:export :parse-file :parse-type :parse-function-call
            :parsing-error))
 (in-package lc.parser)
 
@@ -82,9 +82,17 @@
 
 (defun expect (expected)
   "Get the next character and raise an error if it's not the expected character"
-  (let ((char (get)))
-    (if (not (char= char expected))
-        (parsing-error "Expected '~A', but found '~A'" expected char))))
+  (let* ((char (get))
+         (expect-result
+           (etypecase expected
+             (standard-char (char= char expected))
+             (cons (some (lambda (ch) (equal char ch)) expected)))))
+    (if (not expect-result)
+        (parsing-error "Expected ~A, but found '~A'"
+                       (typecase expected
+                         (standard-char (format nil "'~A'" expected))
+                         (cons (format nil "~{'~A'~^ or ~}" expected)))
+                       char))))
 
 (define-condition parsing-error (error)
   ((message :initarg :message :reader message)
