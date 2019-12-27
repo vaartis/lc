@@ -1,6 +1,8 @@
 (defpackage lc.parser
   (:use :cl)
-  (:shadow :get :symbol))
+  (:shadow :get :symbol)
+  (:export :parse-file :parse-type
+           :parsing-error))
 (in-package lc.parser)
 
 (defclass parsing-context ()
@@ -130,6 +132,9 @@
   (or (alpha-char-p char) (equal char #\_)))
 
 (defun ident-character-p (char)
+  (when (null char)
+    (return-from ident-character-p nil))
+
   (or (alphanumericp char) (equal char #\_)))
 
 (defvar +numeric-chars+ (coerce "1234567890" 'list))
@@ -247,29 +252,132 @@
         ;; Otherwise just return the created type
         pointer-type)))
 
+(defun str-to-keyword (str)
+  (intern (string-upcase str) 'keyword))
 
-(defvar +type-qualifiers+ '("volatile" "const" "restrict"))
+(defvar +simple-type-main-words+ '("void" "char" "int" "float" "double"))
+(defvar +type-modifier-words+ '("volatile" "const" "restrict"))
+(defvar +number-type-length-words+ '("short" "long"))
+(defvar +number-type-sign-words+ '("signed" "unsigned"))
+(defun number-type-modifier-words () (concatenate 'list
+                                                  +number-type-length-words+
+                                                  +number-type-sign-words+))
+
 (defun parse-type ()
-  (let ((qualifiers '()))
-    (loop for next-ident = (peek-ident)
-          while (find next-ident +type-qualifiers+ :test #'string=)
-          do (progn
-               (push (intern (string-upcase (parse-ident)) 'keyword) qualifiers)
-               (skip-empty)))
-    (let* ((type-name (parse-ident))
-           (type (make-instance 'ast-simple-type
-                                :name type-name
-                                :qualifiers qualifiers)))
-      ;; If there's a pointer marker after the type, parse it as a pointer type
-      (if (equal (peek-nonempty) #\*)
-          (progn
-            ;; Skip the empty tokens and the current pointer marker
-            (skip-empty)
-            (get)
+  (let ((type-parts ())
+        (found-main-word nil))
 
-            (parse-pointer-type type))
-          ;; Otherwise return a normal type
-          type))))
+    (tagbody parse-next
+       (let ((next-char (peek)))
+         (cond
+           ((equal next-char #\*)
+
+            (get)
+            (skip-empty)
+
+            (push "*" type-parts)
+
+            (go parse-next))
+           ((find (peek-ident) +simple-type-main-words+ :test #'equal)
+            (let ((main-word (parse-ident)))
+              (when found-main-word
+                (parsing-error "Main type was already found, but another one was encountered: ~A" main-word))
+
+              (setf found-main-word t)
+
+              (push main-word type-parts)
+              (skip-empty)
+
+              (go parse-next)))
+           ((find (peek-ident) (concatenate 'list +type-modifier-words+ (number-type-modifier-words)) :test #'equal)
+
+            (push (parse-ident) type-parts)
+            (skip-empty)
+
+            (go parse-next)))))
+
+    (let ((current-modifiers '())
+
+          number-length-modifier
+          number-sign-modifier
+
+          main-type
+          result-type)
+      (loop for word in type-parts
+            do (cond
+                 ((find word +simple-type-main-words+ :test #'string=)
+                  (setf main-type word))
+
+
+                 ((find word +type-modifier-words+ :test #'string=)
+                  (let ((kw (str-to-keyword word)))
+                    (unless (find kw current-modifiers)
+                      (push kw current-modifiers))))
+
+                 ((find word +number-type-length-words+ :test #'string=)
+                  (unless (or (null number-length-modifier)
+                              (equal number-length-modifier :long))
+                    (parsing-error "Length specifiers '~A' and '~A' don't make sense together"
+                                   number-length-modifier (str-to-keyword word)))
+
+                  (setf number-length-modifier
+                        (if (equal number-length-modifier :long)
+                            ;; If the previous modifer was long, turn the effective modifier into long long
+                            :long-long
+                            (str-to-keyword word))))
+
+
+                 ((find word +number-type-sign-words+ :test #'string=)
+                  (unless (null number-sign-modifier)
+                    (parsing-error "Two number sign specifiers don't make sense"))
+                  (setf number-sign-modifier (str-to-keyword word)))
+
+
+                 ((equal word "*")
+                  (unless (and (null number-sign-modifier) (null number-length-modifier))
+                    (parsing-error "Number modifiers do not make sense on a poiter type"))
+
+                  (when main-type
+                    (parsing-error "Cannot specify a pointer marker on left of the main type"))
+
+                  (etypecase result-type
+                    (null
+                     (setf result-type
+                           (make-instance 'ast-pointer-type
+                                          :qualifiers current-modifiers))
+                     (setf current-modifiers nil))
+                    (ast-pointer-type
+                     (with-accessors ((to-type :to-type)) result-type
+                       (setf to-type (make-instance 'ast-pointer-type
+                                                    :qualifiers current-modifiers))
+                       (setf current-modifiers nil)))))))
+
+      (when (and (null main-type) (not (null number-length-modifier)))
+        (setf main-type "int"))
+      (when (null main-type)
+        (parsing-error "There was no main type in the type declaration"))
+
+      (let ((main-type-qualifiers current-modifiers))
+        (when number-sign-modifier (push number-sign-modifier main-type-qualifiers))
+        (when number-length-modifier (push number-length-modifier main-type-qualifiers))
+
+        (let ((main-type-constructed
+                (make-instance 'ast-simple-type
+                               :name main-type
+                               :qualifiers main-type-qualifiers)))
+          (etypecase result-type
+            (null
+             (setf result-type main-type-constructed))
+
+            (ast-pointer-type
+             (labels ((assign-main-to-pointer (pointer main)
+                        (with-accessors ((to-type :to-type)) pointer
+                          (if (null to-type)
+                              (setf to-type main)
+                              (assign-main-to-pointer to-type main)))))
+               (assign-main-to-pointer result-type main-type-constructed))))
+
+          result-type)))))
 
 (defun parse-function-header-args ()
   "Parses the function header, including the parens. Assumes that the current point is at the opening paren"
