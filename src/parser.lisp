@@ -230,6 +230,10 @@
 (defclass ast-variable-dereference-value (ast-variable-value)
   ((depth :initarg :depth :accessor :depth)))
 
+(defclass ast-function-call (ast-value)
+  ((name :initarg :name :accessor :name)
+   (arguments :initarg :arguments :accessor :arguments)))
+
 (eval-when (:load-toplevel :execute)
   (labels ((all-subclasses (class-name)
              (let* ((class (find-class class-name))
@@ -270,6 +274,21 @@
 (defun number-type-modifier-words () (concatenate 'list
                                                   +number-type-length-words+
                                                   +number-type-sign-words+))
+
+(defvar *should-unwind* nil)
+(defmacro def-unwindable-parser (name (&rest params) &body body)
+  "Defines a parser function that, if a parsing-error is signaled, will unwind the parser
+   and return nil. Otherwise works like a normal defun."
+  (let ((unwind-position-name (gensym "unwind-position")))
+    `(defun ,name (,@params)
+       (if *should-unwind*
+           (let ((,unwind-position-name (slot-value *context* 'position)))
+             (handler-case
+                 (progn ,@body)
+               (parsing-error ()
+                 (setf (slot-value *context* 'position) ,unwind-position-name)
+                 nil)))
+           (progn ,@body)))))
 
 (defun parse-type ()
   (let ((type-parts ())
@@ -469,7 +488,11 @@
               (parse-variable-assignment))
              ;; As a last case, try parsing as a variable definition
              (t
-              (parse-variable-definition))
+              (let* ((*should-unwind* t)
+                     (maybe-parsed-variable (parse-variable-definition)))
+                (if maybe-parsed-variable
+                    maybe-parsed-variable
+                    (parse-expression))))
              ;; (t (parsing-error "Expected an identifier at the beinning of the statement, but found ~A" next-ident))
              )))
     (skip-empty)
@@ -501,7 +524,7 @@
                            :value var-value
                            :depth depth))))))
 
-(defun parse-variable-definition ()
+(def-unwindable-parser parse-variable-definition ()
   (let ((var-type (parse-type)))
     (skip-empty)
     (let ((var-name (parse-ident)))
@@ -525,15 +548,33 @@
             (t
              (parsing-error "Expected ; or = for variable declaration, but got ~A" next-char))))))))
 
+(defun parse-function-call ()
+  (let ((f-name (parse-ident)))
+    (skip-empty)
+    (expect #\()
+    (let ((f-args '()))
+      (tagbody next-arg
+         (skip-empty)
+         (unless (equal (peek) #\))
+           (push (parse-expression) f-args)
+           (skip-empty)
+           (let ((next-char (peek)))
+             (expect '(#\, #\)))
+             (when (equal next-char #\,)
+               (go next-arg)))))
+      (make-instance 'ast-function-call
+                     :name f-name
+                     :arguments (reverse f-args)))))
+
 (defun parse-expression ()
   (let ((next-char (peek)))
     (cond
       ((numeric-char-p next-char)
        (parse-number))
-      ((char= next-char #\*)
+      ((equal next-char #\*)
        (let ((depth 0))
          (tagbody more-depth
-            (when (char= (peek) #\*)
+            (when (equal (peek) #\*)
               (get)
               (skip-empty)
               (incf depth)
@@ -542,16 +583,21 @@
            (make-instance 'ast-variable-dereference-value
                           :name var-name
                           :depth depth))))
-      ((char= next-char #\&)
+      ((equal next-char #\&)
        (get)
        (skip-empty)
        (let ((var-name (parse-ident)))
          (make-instance 'ast-variable-reference-value
                         :name var-name)))
+
       ((not (null (peek-ident)))
-       (make-instance 'ast-variable-value :name (parse-ident)))
-      ;(t (parsing-error "Unknown expression beginning: ~A" next-char))
-      )))
+       ;; Depending on whether it has parens after it or not,
+       ;; it can either be a variable or a function call
+       (let* ((next-ident (peek-ident))
+              (next-char (peek-nonempty (length next-ident))))
+         (case next-char
+           (#\( (parse-function-call))
+           (otherwise (make-instance 'ast-variable-value :name (parse-ident)))))))))
 
 (defun parse-toplevel ()
   (skip-empty)

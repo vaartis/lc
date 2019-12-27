@@ -89,3 +89,34 @@
       (testing "pointer markers are not allowed on the left of the main type"
         (parse-throws "* char" 'lc.parser:parsing-error)
         (parse-throws "char * long" 'lc.parser:parsing-error)))))
+
+(deftest parse-function-call-test
+  (labels ((parsed-f-check (str name arg-types)
+             (testing str
+               (with-context-of-string str
+                 (let ((parsed-call (parse-function-call)))
+                   (with-accessors ((p-name :name) (p-args :arguments)) parsed-call
+                     (ok (equal p-name name) (format nil "function name: ~A == ~A" p-name name))
+                     (ok (= (length p-args) (length arg-types))
+                         (format nil "len(arglist) == len(test param list)"))
+                     (loop for p-arg in p-args
+                           for arg-type in arg-types
+                           for i = 0 then (1+ i)
+                           do (testing (format nil "argument ~A" i)
+                                (ok (subtypep (type-of p-arg) arg-type)
+                                    (format nil "argument type: ~A == ~A" (type-of p-arg) arg-type)))))))))
+           (parse-throws (str error)
+             (testing str
+               (ok
+                (signals
+                    (with-context-of-string str
+                      (parse-function-call))
+                    error)
+                (format nil "parsing ~A throws ~A" str error)))))
+    (parsed-f-check "func(1, 2.0)" "func" '(ast-integer ast-float))
+    (parsed-f-check "func2()" "func2" nil)
+    (testing "invalid calls raise errors"
+      (parse-throws "func(" 'parsing-error)
+      (parse-throws "func1(1.0," 'parsing-error)
+      ;; FIXME: instead of this, make proper checks for NIL
+      (parse-throws "func2(1.0" 'type-error))))
