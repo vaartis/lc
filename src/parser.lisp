@@ -502,11 +502,14 @@
                                  :decl-type var-type)))
 
         (skip-empty)
-        (let ((next-char (get)))
+        (let ((next-char (peek)))
           (case next-char
             ;; Return the declaration if there is no assignment afterwards
+            ;; Don't touch the ";", it will be checked by parse-statement
             (#\; var-decl)
             (#\=
+             ;; Skip the = and everything afterwards
+             (get)
              (skip-empty)
              (make-instance 'ast-variable-definition
                             :var-decl var-decl
