@@ -153,68 +153,81 @@
 (defclass ast () ())
 
 (defclass ast-type (ast)
-  ((qualifiers :initarg :qualifiers :accessor qualifiers))
+  ((qualifiers :initarg :qualifiers :accessor :qualifiers))
   (:default-initargs :qualifiers nil))
 
 (defclass ast-simple-type (ast-type)
-  ((name :initarg :name :accessor name
+  ((name :initarg :name :accessor :name
          :documentation "The name of the type")))
 
 (defclass ast-pointer-type (ast-type)
-  ((to-type :initarg :to-type :accessor to-type
-            :type ast-type)))
+  ((to-type :initarg :to-type :accessor :to-type
+            :type ast-type))
+  (:default-initargs :to-type nil))
 
 (defclass ast-function-declaration (ast)
-  ((return-type :initarg :return-type :accessor return-type)
-   (name :initarg :name :accessor name)
-   (arguments :initarg :arguments :accessor arguments)))
+  ((return-type :initarg :return-type :accessor :return-type)
+   (name :initarg :name :accessor :name)
+   (arguments :initarg :arguments :accessor :arguments)))
 
 (defclass ast-function-definition (ast)
-  ((function-declaration :initarg :function-declaration :accessor function-declaration
+  ((function-declaration :initarg :function-declaration :accessor :function-declaration
                          :type ast-function-declaration)
-   (body :initarg :body :accessor body)))
+   (body :initarg :body :accessor :body)))
 
 
 (defclass ast-statement (ast) ())
 
 (defclass ast-return (ast-statement)
-  ((value :initarg :value :accessor value
+  ((value :initarg :value :accessor :value
           :type ast-value)))
 
 (defclass ast-variable-declaration (ast-statement)
-  ((decl-type :initarg :decl-type :accessor decl-type
+  ((decl-type :initarg :decl-type :accessor :decl-type
               :type ast-type)
-   (name :initarg :name :accessor name)))
+   (name :initarg :name :accessor :name)))
 
 (defclass ast-variable-definition (ast-statement)
-  ((var-decl :initarg :var-decl :accessor var-decl
+  ((var-decl :initarg :var-decl :accessor :var-decl
              :type ast-variable-declaration)
-   (value :initarg :value :accessor value
+   (value :initarg :value :accessor :value
           :type ast-value)))
 
 (defclass ast-variable-assignment (ast-statement)
-  ((name :initarg :name :accessor name)
-   (value :initarg :value :accessor value)))
+  ((name :initarg :name :accessor :name)
+   (value :initarg :value :accessor :value)))
 
 (defclass ast-pointer-assignment (ast-variable-assignment)
   ;; TODO: figure something better out if this doesn't work well
-  ((depth :initarg :depth :accessor depth)))
+  ((depth :initarg :depth :accessor :depth)))
 
 (defclass ast-value (ast) ())
 
 (defclass ast-integer (ast-value)
-  ((value :initarg :value :accessor value)))
+  ((value :initarg :value :accessor :value)))
 
 (defclass ast-float (ast-value)
-  ((value :initarg :value :accessor value)))
+  ((value :initarg :value :accessor :value)))
 
 (defclass ast-variable-value (ast-value)
-  ((name :initarg :name :accessor name)))
+  ((name :initarg :name :accessor :name)))
 
 (defclass ast-variable-reference-value (ast-variable-value) ())
 
 (defclass ast-variable-dereference-value (ast-variable-value)
-  ((depth :initarg :depth :accessor depth)))
+  ((depth :initarg :depth :accessor :depth)))
+
+(eval-when (:load-toplevel :execute)
+  (labels ((all-subclasses (class-name)
+             (let* ((class (find-class class-name))
+                    (subclasses (closer-mop:class-direct-subclasses class)))
+               (alexandria:flatten
+                (map 'list (lambda (class)
+                             (let ((subclasses
+                                     (all-subclasses (class-name class))))
+                               (if (null subclasses) class subclasses)))
+                     subclasses)))))
+    (export (map 'list #'class-name (all-subclasses 'ast)))))
 
 (defun parse-pointer-type (type)
   "Parses a pointer type, assuming that the it has already been determined
