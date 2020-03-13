@@ -219,6 +219,11 @@
 (defclass ast-integer (ast-value)
   ((value :initarg :value :accessor :value)))
 
+(defmethod print-object ((obj ast-integer) out)
+  (print-unreadable-object (obj out)
+    (format out "integer ~A"
+            (:value obj))))
+
 (defclass ast-float (ast-value)
   ((value :initarg :value :accessor :value)))
 
@@ -239,11 +244,14 @@
              (let* ((class (find-class class-name))
                     (subclasses (closer-mop:class-direct-subclasses class)))
                (alexandria:flatten
-                (map 'list (lambda (class)
-                             (let ((subclasses
-                                     (all-subclasses (class-name class))))
-                               (if (null subclasses) class subclasses)))
-                     subclasses)))))
+                (concatenate
+                 'list
+                 (list class)
+                 (map 'list (lambda (class)
+                              (let ((subclasses
+                                      (all-subclasses (class-name class))))
+                                (if (null subclasses) class subclasses)))
+                      subclasses))))))
     (export (map 'list #'class-name (all-subclasses 'ast)))))
 
 (defun parse-pointer-type (type)
