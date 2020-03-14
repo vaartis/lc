@@ -8,6 +8,15 @@
                           :string ,str)))
      ,@body))
 
+(defun parse-throws (parse-f str error)
+  (testing str
+    (ok
+     (signals
+         (with-context-of-string str
+           (funcall parse-f))
+         error)
+     (format nil "parsing ~A throws ~A" str error))))
+
 (deftest parse-type-test
   (labels
       ((type-qualifs (parsed-qualifs qualifs)
@@ -50,16 +59,7 @@
                           ;; For presumably the only normal type, check name and qualifiers and return
                           (ast-simple-type
                            (destructuring-bind (name qualifs) (nth depth params-for-depth)
-                             (type-name-and-qualifs current-depth-t name qualifs))))))))))))
-
-       (parse-throws (str error)
-         (testing str
-           (ok
-            (signals
-                (with-context-of-string str
-                  (parse-type))
-                error)
-            (format nil "parsing ~A throws ~A" str error)))))
+                             (type-name-and-qualifs current-depth-t name qualifs)))))))))))))
 
     (testing "simple types are parsed correctly"
       (testing-simple "char" "char" '())
@@ -72,8 +72,8 @@
         (testing-simple "const long const long volatile const volatile" "int" '(:const :volatile :long-long)))
 
       (testing "conflicting modifiers aren't applied"
-        (parse-throws "const char long short" 'lc.parser:parsing-error)
-        (parse-throws "const char signed unsigned" 'lc.parser:parsing-error)))
+        (parse-throws 'parse-type "const char long short" 'lc.parser:parsing-error)
+        (parse-throws 'parse-type "const char signed unsigned" 'lc.parser:parsing-error)))
 
     (testing "pointer types are parsed correctly"
       (testing-ptr "char*" '((())
@@ -87,8 +87,8 @@
                      ("int" (:const :long))))
 
       (testing "pointer markers are not allowed on the left of the main type"
-        (parse-throws "* char" 'lc.parser:parsing-error)
-        (parse-throws "char * long" 'lc.parser:parsing-error)))))
+        (parse-throws 'parse-type "* char" 'lc.parser:parsing-error)
+        (parse-throws 'parse-type "char * long" 'lc.parser:parsing-error)))))
 
 (deftest parse-function-call-test
   (labels ((parsed-f-check (str name arg-types)
@@ -104,18 +104,68 @@
                            for i = 0 then (1+ i)
                            do (testing (format nil "argument ~A" i)
                                 (ok (subtypep (type-of p-arg) arg-type)
-                                    (format nil "argument type: ~A == ~A" (type-of p-arg) arg-type)))))))))
-           (parse-throws (str error)
-             (testing str
-               (ok
-                (signals
-                    (with-context-of-string str
-                      (parse-function-call))
-                    error)
-                (format nil "parsing ~A throws ~A" str error)))))
+                                    (format nil "argument type: ~A == ~A" (type-of p-arg) arg-type))))))))))
     (parsed-f-check "func(1, 2.0)" "func" '(ast-integer ast-float))
     (parsed-f-check "func2()" "func2" nil)
     (testing "invalid calls raise errors"
-      (parse-throws "func(" 'parsing-error)
-      (parse-throws "func1(1.0," 'parsing-error)
-      (parse-throws "func2(1.0" 'parsing-error))))
+      (parse-throws 'parse-function-call "func(" 'parsing-error)
+      (parse-throws 'parse-function-call "func1(1.0," 'parsing-error)
+      (parse-throws 'parse-function-call "func2(1.0" 'parsing-error))))
+
+(deftest parse-binary-operator-test
+  (labels ((parsed-op-of-string (str test)
+             (testing str
+               (with-context-of-string str
+                 (funcall test (parse-binary-operator)))))
+           (is-function-and-named (op name)
+             (ok (typep op 'ast-function-call) "parsed as function call")
+             (ok (equal (:name op) name) (format nil "operator name is ~A" name)))
+           (nth-arg (op n)
+             (nth n (:arguments op)))
+           (argument-values-are (op expected-args)
+             (let ((op-args (:arguments op)))
+               (loop for arg-n from 0 to (1- (length op-args))
+                     for op-arg = (:value (nth arg-n op-args))
+                     for expected-arg = (nth arg-n expected-args)
+                     do (ok (equal op-arg expected-arg) (format nil "argument ~A = ~A" (+ arg-n 1) expected-arg))))))
+    (parsed-op-of-string "1 + 2" (lambda (op)
+                                   (is-function-and-named op "+")
+                                   (argument-values-are op '(1 2))))
+    (parsed-op-of-string "(1 + 2)" (lambda (op)
+                                     (is-function-and-named op "+")
+                                     (argument-values-are op '(1 2))))
+    (parsed-op-of-string "(1 + (2 + 3))" (lambda (op)
+                                           (is-function-and-named op "+")
+                                           (ok (= (:value (nth-arg op 0)) 1) "first arg is 1")
+                                           (let ((second-arg (nth-arg op 1)))
+                                             (testing "second arg"
+                                               (is-function-and-named second-arg "+")
+                                               (argument-values-are second-arg '(2 3))))))
+
+    (parsed-op-of-string "(1 + (f(21) + 3))" (lambda (op)
+                                               (is-function-and-named op "+")
+                                               (ok (= (:value (nth-arg op 0)) 1) "first arg is 1")
+                                               (let ((second-arg (nth-arg op 1)))
+                                                 (testing "second arg"
+                                                   (is-function-and-named second-arg "+")
+                                                   (testing "first arg"
+                                                     (let ((second-arg-arg (nth-arg second-arg 0)))
+                                                       (is-function-and-named second-arg-arg "f")
+                                                       (argument-values-are second-arg-arg '(21))))
+                                                   (ok (= (:value (nth-arg second-arg 1)) 3) "second arg is 3")))))
+    (parsed-op-of-string "1 - 2 * 3" (lambda (op)
+                                       (is-function-and-named op "-")
+                                       (ok (= (:value (nth-arg op 0)) 1) "first arg is 1")
+                                       (let ((second-arg (nth-arg op 1)))
+                                         (testing "second arg"
+                                           (is-function-and-named second-arg "*")
+                                           (argument-values-are second-arg '(2 3))))))
+
+    (testing "invalid operators and parens raise errors"
+      (parse-throws 'parse-binary-operator ")" 'parsing-error)
+      (parse-throws 'parse-binary-operator "(" 'parsing-error)
+      (parse-throws 'parse-binary-operator "(1 +" 'parsing-error)
+      (parse-throws 'parse-binary-operator "1 + 1)" 'parsing-error)
+      (parse-throws 'parse-binary-operator "1 + 1 * 2)" 'parsing-error)
+      (parse-throws 'parse-binary-operator "((1 + 1 * 2)" 'parsing-error)
+      (parse-throws 'parse-binary-operator "((1 + 1) * 2))" 'parsing-error))))

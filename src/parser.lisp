@@ -1,7 +1,8 @@
 (defpackage lc.parser
   (:use :cl)
   (:shadow :get :symbol)
-  (:export :parse-file :parse-type :parse-function-call
+  (:export :parse-file :parse-type
+           :parse-function-call :parse-binary-operator
            :parsing-error))
 (in-package lc.parser)
 
@@ -580,6 +581,11 @@
    (precedence :initarg :precedence :accessor :precedence)
    (is-r :initarg :is-r :accessor :is-r)))
 
+(defmethod print-object ((obj operator) out)
+  (print-unreadable-object (obj out)
+    (format out "operator ~A"
+            (:name obj))))
+
 (defun make-operator (name precedence is-r)
   (make-instance 'operator :name name :precedence precedence :is-r is-r))
 
@@ -590,8 +596,8 @@
    (make-operator "*" 2 nil)
    (make-operator "/" 2 nil)
    (make-operator "%" 2 nil)
-   (make-operator "(" 3 nil)
-   (make-operator ")" 3 nil)))
+   (make-operator "(" -1 nil)
+   (make-operator ")" -1 nil)))
 
 (def-unwindable-parser parse-binary-operator ()
   (let (result-queue operator-stack)
@@ -613,7 +619,8 @@
                     do (progn
                          (push (pop operator-stack) result-queue)
                          (setf match t)))
-
+              (unless (and match (car operator-stack) (equal (:name (car operator-stack)) "("))
+                (parsing-error "Mispatched parens"))
               (pop operator-stack)
 
               (when (and (not match) (null operator-stack))
