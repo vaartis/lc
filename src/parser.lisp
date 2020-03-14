@@ -51,8 +51,11 @@
           (loop for skipped-chars = 0 then (1+ skipped-chars)
                 for current-char = (peek skipped-chars)
                 while (and (not (null current-char))
-                           (first-character-p current-char))
-                collect current-char)))
+                           (if (null collected-word)
+                               (first-character-p current-char)
+                               (ident-character-p current-char)))
+                collect current-char into collected-word
+                finally (return collected-word))))
     (if (null collected-word)
         collected-word
         (concatenate 'string collected-word))))
