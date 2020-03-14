@@ -231,6 +231,11 @@
 (defclass ast-variable-value (ast-value)
   ((name :initarg :name :accessor :name)))
 
+(defmethod print-object ((obj ast-variable-value) out)
+  (print-unreadable-object (obj out)
+    (format out "variable-value ~A"
+            (:name obj))))
+
 (defclass ast-variable-reference-value (ast-variable-value) ())
 
 (defclass ast-variable-dereference-value (ast-variable-value)
@@ -239,6 +244,11 @@
 (defclass ast-function-call (ast-value)
   ((name :initarg :name :accessor :name)
    (arguments :initarg :arguments :accessor :arguments)))
+
+(defmethod print-object ((obj ast-function-call) out)
+  (print-unreadable-object (obj out)
+    (format out "call ~A~A"
+            (:name obj) (:arguments obj))))
 
 (eval-when (:load-toplevel :execute)
   (labels ((all-subclasses (class-name)
