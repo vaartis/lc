@@ -47,11 +47,18 @@
 
 (defclass save-into-instruction (instruction)
   ((name :initarg :name
-         :accessor :name)))
+         :accessor :name)
+   (type :initarg :type
+         :accessor :type)))
 
 (defmethod print-object ((obj save-into-instruction) out)
   (print-unreadable-object (obj out)
     (format out "save-into ~A" (:name obj))))
+
+(defun make-save-into-instruction (name type)
+  (symbol-macrolet ((var-in-hash (gethash name (car (:translation-locals-types-stack *evaluator-state*)))))
+    (setf var-in-hash type)
+    (make-instance 'save-into-instruction :name name :type type)))
 
 (defclass call-instruction (instruction)
   ((name :initarg :name
@@ -69,9 +76,11 @@
 
 (defmethod type-of-ast ((ast ast-variable-value))
   (let* ((name (:name ast))
-         (locals (car (:locals-stack *evaluator-state*)))
-         (var-value (gethash name locals)))
-    (break)))
+         (types (car (:translation-locals-types-stack *evaluator-state*)))
+         (var-type (gethash name types)))
+    (when (null var-type)
+      (error "Variable ~A undefined" name))
+    var-type))
 
 (defgeneric evaluate (value))
 
@@ -117,39 +126,52 @@
   (destructuring-bind (name . tp) arg
     (cons name (ast-to-memory-type tp))))
 
+(defun define-runtime-function (func-name ret-type args)
+  (symbol-macrolet ((func-in-hash (gethash func-name (:functions *evaluator-state*))))
+
+    (let* ((runtime-ret-t (ast-to-memory-type ret-type))
+           (runtime-args (map 'list #'ast-to-memory-arg args))
+           (runtime-f-decl
+             (make-instance 'runtime-function
+                            :return-type runtime-ret-t
+                            :arguments runtime-args
+                            :name func-name)))
+      (when (not (null func-in-hash))
+        (warn "Redefining function '~A'" func-name))
+
+      ;; Store the function declaration
+      (setf func-in-hash runtime-f-decl)
+
+      runtime-f-decl)))
+
 (defmethod evaluate ((func-decl ast-function-declaration))
   (with-accessors ((func-name :name) (ret-type :return-type) (args :arguments)) func-decl
-    (symbol-macrolet ((func-in-hash (gethash func-name (:functions *evaluator-state*))))
-
-      (let* ((runtime-ret-t (ast-to-memory-type ret-type))
-             (runtime-args (map 'list #'ast-to-memory-arg args))
-             (runtime-f-decl
-               (make-instance 'runtime-function
-                              :return-type runtime-ret-t
-                              :arguments runtime-args
-                              :name func-name)))
-        (when (not (null func-in-hash))
-          (warn "Redefining function '~A'" func-name))
-
-        ;; Store the function declaration
-        (setf func-in-hash runtime-f-decl)
-
-        runtime-f-decl))))
+    (define-runtime-function func-name ret-type args)))
 
 (defmethod evaluate ((func-def ast-function-definition))
   (with-accessors ((f-decl :function-declaration) (body :body)) func-def
     (let ((runtime-f-decl (evaluate f-decl)))
       (with-accessors ((r-body :body) (r-args :arguments)) runtime-f-decl
-        ;; Compile instructions and put them into the runtime function
-        (setf r-body (alexandria:flatten (map 'list #'translate body)))
+
+        ;; Create a new locals types frame
+        (push (make-hash-table :test #'equal) (:translation-locals-types-stack *evaluator-state*))
+
+        ;; Push args
+        (loop for arg in r-args
+              do (push (make-save-into-instruction (car arg) (cdr arg)) r-body))
 
         ;; Put save-sp after the arguments, so when the stack is saved,
         ;; things can be written over old arguments
         (push (make-instance 'save-sp-instruction) r-body)
 
-        ;; Push args, reversing the arglist, so they're pushed in order
-        (loop for arg in (reverse r-args)
-              do (push (make-instance 'save-into-instruction :name (car arg)) r-body))
+        ;; Compile instructions and put them into the runtime function
+        (loop for instr in (alexandria:flatten (map 'list #'translate body))
+              do (push instr r-body))
+
+        (setf r-body (reverse r-body))
+
+        ;; Pop the locals types frame
+        (pop (:translation-locals-types-stack *evaluator-state*))
 
         ;; Return the declaration/definition (now that it has a body)
         runtime-f-decl))))
@@ -162,7 +184,9 @@
   (let* ((call-instrs (translate call))
          ;; A name for the temporary local to store data in, adding $ to it should make it pretty much uncollidable
          (tmp-local-name (format nil "$tmp_~A" (length (:locals-stack *evaluator-state*))))
-         (save-into-tmp-instr (make-instance 'save-into-instruction :name tmp-local-name)))
+         ;; The function is guaranteed to be defined here, since it's checked in (translate call)
+         (defined-func (gethash (:name call) (:functions *evaluator-state*)))
+         (save-into-tmp-instr (make-save-into-instruction tmp-local-name (:return-type defined-func))))
     (cons
      ;; First, return values to generate to load the data
      (concatenate 'list call-instrs (list save-into-tmp-instr))
@@ -209,10 +233,17 @@
                    name def-args args))
 
           (let (push-args-instructions)
-            ;; Check argument types and allocate arguments
             (unless (zerop def-args-len)
-              (loop for arg in args
-                    do (push (make-instance 'push-instruction :pushed-value arg) push-args-instructions)))
+              (loop for arg-num from 0 to (1- def-args-len)
+                do (let ((def-arg-at-n (nth arg-num def-args))
+                         (arg-at-n (nth arg-num args)))
+                     (destructuring-bind (def-arg-at-n-name . def-arg-at-n-type) def-arg-at-n
+                       (let ((mem-type-of-ast (type-of-ast arg-at-n)))
+                         (unless (memory-type-equal def-arg-at-n-type mem-type-of-ast)
+                           (error "Wrong type for argument #~A (~A) of call to ~A: expected ~A, but got ~A"
+                                  arg-num def-arg-at-n-name name (:type-name def-arg-at-n-type) (:type-name mem-type-of-ast))))
+
+                       (push (make-instance 'push-instruction :pushed-value arg-at-n) push-args-instructions)))))
             (let ((calling-instruction (list (make-instance 'call-instruction :name name))))
               (concatenate 'list
                            push-args-instructions
@@ -224,7 +255,9 @@
    (saved-stack-pointers :initform nil :accessor :saved-stack-pointers)
    (locals-stack :initform nil :accessor :locals-stack)
 
-   (function :initform (make-hash-table :test #'equal) :accessor :functions)))
+   (functions :initform (make-hash-table :test #'equal) :accessor :functions)
+
+   (translation-locals-types-stack :initform nil :accessor :translation-locals-types-stack)))
 
 (defvar *evaluator-state*)
 
@@ -238,19 +271,25 @@
     (decf sp)
     (aref (:stack *evaluator-state*) (:stack-pointer *evaluator-state*))))
 
-(defgeneric evaluate-instr (instruction))
-
-(defmethod evaluate-instr ((instr comment-instruction)))
-
-(defmethod evaluate-instr ((instr save-sp-instruction))
+(defun save-sp ()
   (push (:stack-pointer *evaluator-state*) (:saved-stack-pointers *evaluator-state*)))
 
-(defmethod evaluate-instr ((instr restore-sp-instruction))
+(defun restore-sp ()
   (with-accessors ((saved-sps :saved-stack-pointers) (sp :stack-pointer)) *evaluator-state*
     (let ((saved-sp (pop saved-sps)))
       (if (null saved-sp)
         (error "No saved stack pointer"))
       (setf sp saved-sp))))
+
+(defgeneric evaluate-instr (instruction))
+
+(defmethod evaluate-instr ((instr comment-instruction)))
+
+(defmethod evaluate-instr ((instr save-sp-instruction))
+  (save-sp))
+
+(defmethod evaluate-instr ((instr restore-sp-instruction))
+  (restore-sp))
 
 (defmethod evaluate-instr ((instr push-instruction))
   (with-accessors ((sp :stack-pointer) (stack :stack)) *evaluator-state*
