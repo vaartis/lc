@@ -68,7 +68,7 @@
     (let*
         ((rest-list (loop for ch = (peek)
                           while (or (numeric-char-p ch)
-                                    (char= ch #\.))
+                                    (equal ch #\.))
                           collect (progn
                                     (get)
                                     ch)))
@@ -500,6 +500,7 @@
                      (maybe-parsed-variable (parse-variable-definition)))
                 (if maybe-parsed-variable
                     maybe-parsed-variable
+                    ;; Otherwise, parse as an expression
                     (parse-expression))))
              ;; (t (parsing-error "Expected an identifier at the beinning of the statement, but found ~A" next-ident))
              )))
@@ -574,7 +575,123 @@
                      :name f-name
                      :arguments (reverse f-args)))))
 
-(defun parse-expression ()
+(defclass operator ()
+  ((name :initarg :name :accessor :name)
+   (precedence :initarg :precedence :accessor :precedence)
+   (is-r :initarg :is-r :accessor :is-r)))
+
+(defun make-operator (name precedence is-r)
+  (make-instance 'operator :name name :precedence precedence :is-r is-r))
+
+(defvar +binary-operators+
+  (list
+   (make-operator "+" 1 nil)
+   (make-operator "-" 1 nil)
+   (make-operator "*" 2 nil)
+   (make-operator "/" 2 nil)
+   (make-operator "%" 2 nil)
+   (make-operator "(" 3 nil)
+   (make-operator ")" 3 nil)))
+
+(def-unwindable-parser parse-binary-operator ()
+
+  (let (result-queue operator-stack)
+    (tagbody repeat
+       (let ((next-nonempt (string (peek-nonempty))))
+         (cond
+           ((equal next-nonempt "(")
+
+            (push (find "(" +binary-operators+ :key #':name :test #'equal) operator-stack)
+
+            (skip-empty)
+            (get)
+
+            (go repeat))
+           ((equal next-nonempt ")")
+            (let (match)
+              (loop while (and (not (null operator-stack))
+                               (string-not-equal (:name (car operator-stack)) "("))
+                    do (progn
+                         (push (pop operator-stack) result-queue)
+                         (setf match t)))
+
+              (pop operator-stack)
+
+              (when (and (not match) (null operator-stack))
+                (parsing-error "Mismatching parens"))
+
+              (skip-empty)
+              (get)
+
+              (go repeat)))
+           ((find next-nonempt +binary-operators+ :key #':name :test #'equal)
+            (let ((o1 (find next-nonempt +binary-operators+ :key #':name :test #'equal)))
+              (loop until (null operator-stack)
+                    do (let ((o2 (car operator-stack)))
+                         (if (or
+                              (and
+                               (not (:is-r o1))
+                               (<= (:precedence o1) (:precedence o2)))
+                              (and
+                               (and
+                                (:is-r o1)
+                                (< (:precedence o1) (:precedence o2)))))
+                             (progn
+                               (pop operator-stack)
+                               (push o2 result-queue))
+                             ;; Exit the loop
+                             (return))))
+              (push o1 operator-stack)
+
+              (skip-empty)
+              (get)
+
+              (go repeat)))
+           (t
+            (skip-empty)
+
+            (let* ((*should-unwind* t)
+                   (maybe-parsed-expr (parse-expression nil)))
+              (unless (null maybe-parsed-expr)
+                (push maybe-parsed-expr result-queue)
+                (go repeat)))))))
+
+    (loop until (null operator-stack)
+          do (if (equal (:name (car operator-stack)) "(")
+                 (parsing-error "Mismatching parens")
+                 (push (pop operator-stack) result-queue)))
+
+    (let (arg-stack
+          (reversed-queue (reverse result-queue)))
+      (loop until (null reversed-queue)
+            do (let ((curr-tok (pop reversed-queue)))
+                 (etypecase curr-tok
+                   (ast-value
+                    (push curr-tok arg-stack))
+                   (operator
+                    (unless (find (:name curr-tok) '("(" ")") :test #'equal)
+                      (let ((rhs (pop arg-stack))
+                            (lhs (pop arg-stack)))
+                        (push (make-instance 'ast-function-call
+                                             :name (:name curr-tok)
+                                             :arguments (list lhs rhs))
+                              arg-stack)))))))
+      (print arg-stack)
+
+      (when (/= 1 (length arg-stack))
+        (parsing-error "Mismatched number of arguments for binary operator"))
+      (when (equal (:name (car arg-stack)) "(")
+        (parsing-error "Mismatching parens"))
+
+      (car arg-stack))))
+
+(def-unwindable-parser parse-expression (&optional (test-for-binary-op t))
+  (when test-for-binary-op
+    (let* ((*should-unwind* t)
+           (maybe-parsed-op (parse-binary-operator)))
+      (when maybe-parsed-op
+        (return-from parse-expression maybe-parsed-op))))
+
   (let ((next-char (peek)))
     (cond
       ((numeric-char-p next-char)
@@ -605,7 +722,9 @@
               (next-char (peek-nonempty (length next-ident))))
          (case next-char
            (#\( (parse-function-call))
-           (otherwise (make-instance 'ast-variable-value :name (parse-ident)))))))))
+           (otherwise (make-instance 'ast-variable-value :name (parse-ident))))))
+      (t
+       (parsing-error "Unrecognized expression")))))
 
 (defun parse-toplevel ()
   (skip-empty)
