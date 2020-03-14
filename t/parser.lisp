@@ -118,5 +118,4 @@
     (testing "invalid calls raise errors"
       (parse-throws "func(" 'parsing-error)
       (parse-throws "func1(1.0," 'parsing-error)
-      ;; FIXME: instead of this, make proper checks for NIL
-      (parse-throws "func2(1.0" 'type-error))))
+      (parse-throws "func2(1.0" 'parsing-error))))

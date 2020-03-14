@@ -594,7 +594,6 @@
    (make-operator ")" 3 nil)))
 
 (def-unwindable-parser parse-binary-operator ()
-
   (let (result-queue operator-stack)
     (tagbody repeat
        (let ((next-nonempt (string (peek-nonempty))))
@@ -676,11 +675,10 @@
                                              :name (:name curr-tok)
                                              :arguments (list lhs rhs))
                               arg-stack)))))))
-      (print arg-stack)
 
       (when (/= 1 (length arg-stack))
         (parsing-error "Mismatched number of arguments for binary operator"))
-      (when (equal (:name (car arg-stack)) "(")
+      (when (and (typep (car arg-stack) 'operator) (equal (:name (car arg-stack)) "("))
         (parsing-error "Mismatching parens"))
 
       (car arg-stack))))
