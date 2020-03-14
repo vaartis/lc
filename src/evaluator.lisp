@@ -31,7 +31,7 @@
 (defmethod print-object ((obj comment-instruction) out)
   (print-unreadable-object (obj out)
     (format out "; ~A"
-            (:pushed-value obj))))
+            (:comment obj))))
 
 (defclass save-sp-instruction (instruction) ())
 
@@ -66,6 +66,12 @@
 
 (defmethod type-of-ast ((ast ast-float))
   (get-standard-simple-type "float"))
+
+(defmethod type-of-ast ((ast ast-variable-value))
+  (let* ((name (:name ast))
+         (locals (car (:locals-stack *evaluator-state*)))
+         (var-value (gethash name locals)))
+    (break)))
 
 (defgeneric evaluate (value))
 
@@ -136,7 +142,9 @@
       (with-accessors ((r-body :body) (r-args :arguments)) runtime-f-decl
         ;; Compile instructions and put them into the runtime function
         (setf r-body (alexandria:flatten (map 'list #'translate body)))
-        ;; Add a save-sp at the beginning
+
+        ;; Put save-sp after the arguments, so when the stack is saved,
+        ;; things can be written over old arguments
         (push (make-instance 'save-sp-instruction) r-body)
 
         ;; Push args, reversing the arglist, so they're pushed in order
@@ -146,10 +154,43 @@
         ;; Return the declaration/definition (now that it has a body)
         runtime-f-decl))))
 
+(defgeneric translate-expr (expr))
+
+(defmethod translate-expr ((call ast-function-call))
+  ;; First, translate the instructions to call the function.
+  ;; After it's called, the result will be on the stack
+  (let* ((call-instrs (translate call))
+         ;; A name for the temporary local to store data in, adding $ to it should make it pretty much uncollidable
+         (tmp-local-name (format nil "$tmp_~A" (length (:locals-stack *evaluator-state*))))
+         (save-into-tmp-instr (make-instance 'save-into-instruction :name tmp-local-name)))
+    (cons
+     ;; First, return values to generate to load the data
+     (concatenate 'list call-instrs (list save-into-tmp-instr))
+     ;; Second, return the what to use to actually load that data
+     (make-instance 'ast-variable-value :name tmp-local-name))))
+
+(defmethod translate-expr ((int ast-integer))
+  (cons nil int))
+
+(defmethod translate-expr ((float ast-float))
+  (cons nil float))
+
+(defmethod translate-expr ((val ast-variable-value))
+  (cons nil val))
+
 (defmethod translate ((ret ast-return))
-  (list
-   (make-instance 'restore-sp-instruction)
-   (make-instance 'push-instruction :pushed-value (:value ret))))
+  (destructuring-bind (expr-generated-instrs . expr-load-value) (translate-expr (:value ret))
+    (concatenate
+     'list
+     (list
+      (make-instance 'comment-instruction :comment "return begins here"))
+     ;; Insert instructions generated for the returning expression
+     expr-generated-instrs
+     (list
+      ;; Reset the stack pointer
+      (make-instance 'restore-sp-instruction)
+      ;; Push the returned expression onto the stack
+      (make-instance 'push-instruction :pushed-value expr-load-value)))))
 
 (defmethod translate ((func-call ast-function-call))
   (with-accessors ((name :name) (args :arguments)) func-call
@@ -158,8 +199,8 @@
         (error "Function ~A is not declared or defined" name))
 
       (with-accessors ((def-args :arguments) (body :body) (def-type :return-type)) defined-func
-        (unless body
-          (error "Function ~A is declared, but not defined" name))
+        ;;(unless body
+        ;;  (error "Function ~A is declared, but not defined" name))
 
         (let ((def-args-len (length def-args))
               (args-len (length args)))
@@ -170,16 +211,8 @@
           (let (push-args-instructions)
             ;; Check argument types and allocate arguments
             (unless (zerop def-args-len)
-              (loop for arg-num from 0 to (1- def-args-len)
-                    do (let ((def-arg-at-n (nth arg-num def-args))
-                             (arg-at-n (nth arg-num args)))
-                         (destructuring-bind (def-arg-at-n-name . def-arg-at-n-type) def-arg-at-n
-                           (let ((mem-type-of-ast (type-of-ast arg-at-n)))
-                             (unless (memory-type-equal def-arg-at-n-type mem-type-of-ast)
-                               (error "Wrong type for argument #~A (~A) of call to ~A: expected ~A, but got ~A"
-                                      arg-num def-arg-at-n-name name (:type-name def-arg-at-n-type) (:type-name mem-type-of-ast))))
-
-                           (push (make-instance 'push-instruction :pushed-value arg-at-n) push-args-instructions)))))
+              (loop for arg in args
+                    do (push (make-instance 'push-instruction :pushed-value arg) push-args-instructions)))
             (let ((calling-instruction (list (make-instance 'call-instruction :name name))))
               (concatenate 'list
                            push-args-instructions
@@ -206,6 +239,8 @@
     (aref (:stack *evaluator-state*) (:stack-pointer *evaluator-state*))))
 
 (defgeneric evaluate-instr (instruction))
+
+(defmethod evaluate-instr ((instr comment-instruction)))
 
 (defmethod evaluate-instr ((instr save-sp-instruction))
   (push (:stack-pointer *evaluator-state*) (:saved-stack-pointers *evaluator-state*)))
@@ -246,12 +281,18 @@
   `(let ((*evaluator-state* ,state))
      ,@rest))
 
-(defmethod run-with-current-state (instructions)
+(defun run-with-current-state (instructions)
   (loop for instr in instructions
           do (evaluate-instr instr)))
 
-(defmethod run-with-state (state instructions)
-  (with-state state (run-with-current-state instructions)))
+(defmacro run-with-state (state instructions)
+  `(with-state ,state
+     (run-with-current-state ,instructions)))
 
-(defmethod run (instructions)
-  (run-with-state (make-instance 'evaluator-state) instructions))
+(defmacro run (instructions)
+  `(run-with-state (make-instance 'evaluator-state) ,instructions))
+
+
+(defun disasm-runtime-function (fnc)
+  (loop for instr in (:body fnc)
+        do (print instr)))
