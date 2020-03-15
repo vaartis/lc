@@ -69,7 +69,7 @@
     (format out "call ~A" (:name obj))))
 
 (defmethod type-of-ast ((ast ast-integer))
-  (get-standard-simple-type "int"))
+  +int-t+)
 
 (defmethod type-of-ast ((ast ast-float))
   (get-standard-simple-type "float"))
@@ -267,10 +267,48 @@
                         (rhs-type (type-of-ast (nth 1 args))))
                     (match (cons (:type-name lhs-type) (:type-name rhs-type))
                       ((cons "int" "int")
-                       (cdr (assoc "int+int" (:intrinsics *evaluator-state*) :test #'equal))))))))))
+                       (cdr (assoc "int+int" (:intrinsics *evaluator-state*) :test #'equal))))))))
+        (cons "-"
+              (lambda (args)
+                (when (= (length args) 2)
+                  (let ((lhs-type (type-of-ast (nth 0 args)))
+                        (rhs-type (type-of-ast (nth 1 args))))
+                    (match (cons (:type-name lhs-type) (:type-name rhs-type))
+                      ((cons "int" "int")
+                       (cdr (assoc "int-int" (:intrinsics *evaluator-state*) :test #'equal))))))))
+        (cons "/"
+              (lambda (args)
+                (when (= (length args) 2)
+                  (let ((lhs-type (type-of-ast (nth 0 args)))
+                        (rhs-type (type-of-ast (nth 1 args))))
+                    (match (cons (:type-name lhs-type) (:type-name rhs-type))
+                      ((cons "int" "int")
+                       (cdr (assoc "int/int" (:intrinsics *evaluator-state*) :test #'equal))))))))
+        (cons "%"
+              (lambda (args)
+                (when (= (length args) 2)
+                  (let ((lhs-type (type-of-ast (nth 0 args)))
+                        (rhs-type (type-of-ast (nth 1 args))))
+                    (match (cons (:type-name lhs-type) (:type-name rhs-type))
+                      ((cons "int" "int")
+                       (cdr (assoc "int%int" (:intrinsics *evaluator-state*) :test #'equal))))))))
+        (cons "*"
+              (lambda (args)
+                (when (= (length args) 2)
+                  (let ((lhs-type (type-of-ast (nth 0 args)))
+                        (rhs-type (type-of-ast (nth 1 args))))
+                    (match (cons (:type-name lhs-type) (:type-name rhs-type))
+                      ((cons "int" "int")
+                       (cdr (assoc "int*int" (:intrinsics *evaluator-state*) :test #'equal))))))))))
 
-(defun define-intrinsics ()
-  )
+(defmacro lambda-op-intrinsic (name (lhs-type rhs-type ret-type) (lhs-name rhs-name) &body body)
+  `(make-instance 'runtime-function
+                  :name ,name
+                  :return-type ,ret-type
+                  :arguments `(("lhs" . ,,lhs-type)
+                               ("rhs" . ,,rhs-type))
+                  :body (lambda (,lhs-name ,rhs-name)
+                          ,@body)))
 
 (defclass evaluator-state ()
   ((stack :initform (make-array 16 :adjustable t :initial-element nil) :accessor :stack)
@@ -284,15 +322,27 @@
 
    (intrinsics :initform
                (list (cons "int+int"
-                           (make-instance 'runtime-function
-                                          :name "int+int"
-                                          :return-type (get-standard-simple-type "int")
-                                          :arguments (list
-                                                      (cons "lhs" (get-standard-simple-type "int"))
-                                                      (cons "rhs" (get-standard-simple-type "int")))
-                                          :body (lambda (lhs rhs)
-                                                  (make-instance 'ast-integer
-                                                                 :value (+ (:value lhs) (:value rhs)))))))
+                           (lambda-op-intrinsic "int+int" (+int-t+ +int-t+ +int-t+) (lhs rhs)
+                             (make-instance 'ast-integer
+                                            :value (+ (:value lhs) (:value rhs)))))
+                     (cons "int-int"
+                           (lambda-op-intrinsic "int-int" (+int-t+ +int-t+ +int-t+) (lhs rhs)
+                             (make-instance 'ast-integer
+                                            :value (- (:value lhs) (:value rhs)))))
+                     (cons "int/int"
+                           (lambda-op-intrinsic "int/int" (+int-t+ +int-t+ +int-t+) (lhs rhs)
+                             (make-instance 'ast-integer
+                                            :value (floor (:value lhs) (:value rhs)))))
+                     (cons "int%int"
+                           (lambda-op-intrinsic "int%int" (+int-t+ +int-t+ +int-t+) (lhs rhs)
+                             (multiple-value-bind (div remainder) (floor (:value lhs) (:value rhs))
+                               (declare (ignore div))
+                               (make-instance 'ast-integer
+                                              :value remainder))))
+                     (cons "int*int"
+                           (lambda-op-intrinsic "int*int" (+int-t+ +int-t+ +int-t+) (lhs rhs)
+                             (make-instance 'ast-integer
+                                            :value (* (:value lhs) (:value rhs))))))
                :accessor :intrinsics)))
 
 (defvar *evaluator-state*)

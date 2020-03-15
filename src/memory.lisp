@@ -14,6 +14,8 @@
    :remove-from-memory
 
    :get-standard-simple-type
+   :+int-t+
+
    :*memory*))
 (in-package lc.memory)
 
@@ -67,7 +69,9 @@
 (eval-when (:load-toplevel :execute)
   (add-simple-type "char" 1)
   (add-simple-type "int" 4)
-  (add-simple-type "float" 4))
+  (add-simple-type "float" 4)
+
+  (defvar +int-t+ (get-standard-simple-type "int")))
 
 (defvar *memory* '())
 

@@ -39,5 +39,9 @@
 
         (testing "calling a function as an expression"
           (test-call-result "test3" "int test3(int x, int y) { return test1(y, x); }" "test3(23, 24)" 3 24))
-        (testing "calling an intrinsic int+int"
-          (test-call-result "test4" "int test4(int x, int y) { return x + y; }" "test4(21, 9)" 4 30))))))
+        (testing "calling intrinsics"
+          (test-call-result "test_add" "int test_add(int x, int y) { return x + y; }" "test_add(21, 9)" 4 30)
+          (test-call-result "test_sub" "int test_sub(int x, int y) { return x - y; }" "test_sub(20, 10)" 5 10)
+          (test-call-result "test_div" "int test_div(int x, int y) { return x / y; }" "test_div(20, 10)" 6 2)
+          (test-call-result "test_rem" "int test_rem(int x, int y) { return x % y; }" "test_rem(1, 2)" 7 1)
+          (test-call-result "test_mul" "int test_mul(int x, int y) { return x * y; }" "test_mul(2, 10)" 8 20))))))
