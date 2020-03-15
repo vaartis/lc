@@ -183,7 +183,7 @@
   ;; After it's called, the result will be on the stack
   (let* ((call-instrs (translate call))
          ;; A name for the temporary local to store data in, adding $ to it should make it pretty much uncollidable
-         (tmp-local-name (format nil "$tmp_~A" (length (:locals-stack *evaluator-state*))))
+         (tmp-local-name (format nil "$tmp_~A" (hash-table-count (car (:translation-locals-types-stack *evaluator-state*)))))
          ;; The function is guaranteed to be defined here, since it's checked in (translate call)
          (defined-func (gethash (:name call) (:functions *evaluator-state*)))
          (save-into-tmp-instr (make-save-into-instruction tmp-local-name (:return-type defined-func))))
