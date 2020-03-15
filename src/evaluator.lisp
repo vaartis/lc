@@ -126,27 +126,21 @@
   (destructuring-bind (name . tp) arg
     (cons name (ast-to-memory-type tp))))
 
-(defun define-runtime-function (func-name ret-type args)
-  (symbol-macrolet ((func-in-hash (gethash func-name (:functions *evaluator-state*))))
-
-    (let* ((runtime-ret-t (ast-to-memory-type ret-type))
-           (runtime-args (map 'list #'ast-to-memory-arg args))
-           (runtime-f-decl
-             (make-instance 'runtime-function
-                            :return-type runtime-ret-t
-                            :arguments runtime-args
-                            :name func-name)))
-      (when (not (null func-in-hash))
-        (warn "Redefining function '~A'" func-name))
-
-      ;; Store the function declaration
-      (setf func-in-hash runtime-f-decl)
-
-      runtime-f-decl)))
-
 (defmethod evaluate ((func-decl ast-function-declaration))
   (with-accessors ((func-name :name) (ret-type :return-type) (args :arguments)) func-decl
-    (define-runtime-function func-name ret-type args)))
+    (symbol-macrolet ((func-in-hash (gethash func-name (:functions *evaluator-state*))))
+      (let* ((runtime-ret-t (ast-to-memory-type ret-type))
+             (runtime-args (map 'list #'ast-to-memory-arg args))
+             (runtime-f-decl
+               (make-instance 'runtime-function
+                              :name func-name
+                              :return-type runtime-ret-t
+                              :arguments runtime-args)))
+        (when (not (null func-in-hash))
+          (warn "Redefining function '~A'" func-name))
+
+        ;; Store the function declaration
+        (setf func-in-hash runtime-f-decl)))))
 
 (defmethod evaluate ((func-def ast-function-definition))
   (with-accessors ((f-decl :function-declaration) (body :body)) func-def
@@ -296,13 +290,9 @@
                                           :arguments (list
                                                       (cons "lhs" (get-standard-simple-type "int"))
                                                       (cons "rhs" (get-standard-simple-type "int")))
-                                          :body (lambda ()
-                                                  (let ((lhs (pop-from-stack))
-                                                        (rhs (pop-from-stack)))
-                                                    ;; No need to save or restore the SP, since it will already be writing
-                                                    ;; onto the arguments. Just push the result onto the new position.
-                                                    (let ((sum (+ (:value lhs) (:value rhs))))
-                                                      (push-onto-stack (make-instance 'ast-integer :value sum))))))))
+                                          :body (lambda (lhs rhs)
+                                                  (make-instance 'ast-integer
+                                                                 :value (+ (:value lhs) (:value rhs)))))))
                :accessor :intrinsics)))
 
 (defvar *evaluator-state*)
@@ -356,7 +346,16 @@
       ((type list)
        (map 'list #'evaluate-instr body))
       ((type function)
-       (funcall body)))
+       (let (args)
+         (loop for n from 1 to (length (:arguments runtime-f))
+               do (push (pop-from-stack) args))
+         ;; Save SP before calling the function
+         (save-sp)
+         ;; Call the intrinsic with the poppped argument list reversed, to they're in the correct order
+         (let ((result (apply body (reverse args))))
+           ;; After the call, restore SP and push the result onto the stack
+           (restore-sp)
+           (push-onto-stack result)))))
 
     (pop (:locals-stack *evaluator-state*))))
 
