@@ -1,6 +1,6 @@
 (asdf:defsystem #:lc
   :pathname "src"
-  :depends-on (:parse-float :closer-mop)
+  :depends-on (:parse-float :closer-mop :trivia)
   :components
   ((:file "memory")
    (:file "parser")

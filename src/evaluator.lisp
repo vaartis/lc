@@ -1,5 +1,5 @@
 (defpackage lc.evaluator
-  (:use :cl :lc.parser :lc.memory)
+  (:use :cl :lc.parser :lc.memory :trivia)
   (:export :run :run-with-state :run-with-current-state :with-state
            :evaluator-state :*evaluator-state*
            :translate))
@@ -185,7 +185,7 @@
          ;; A name for the temporary local to store data in, adding $ to it should make it pretty much uncollidable
          (tmp-local-name (format nil "$tmp_~A" (hash-table-count (car (:translation-locals-types-stack *evaluator-state*)))))
          ;; The function is guaranteed to be defined here, since it's checked in (translate call)
-         (defined-func (gethash (:name call) (:functions *evaluator-state*)))
+         (defined-func (get-defined-func (:name call) (:arguments call)))
          (save-into-tmp-instr (make-save-into-instruction tmp-local-name (:return-type defined-func))))
     (cons
      ;; First, return values to generate to load the data
@@ -216,13 +216,29 @@
       ;; Push the returned expression onto the stack
       (make-instance 'push-instruction :pushed-value expr-load-value)))))
 
-(defmethod translate ((func-call ast-function-call))
-  (with-accessors ((name :name) (args :arguments)) func-call
-    (let ((defined-func (gethash name (:functions *evaluator-state*))))
+(defun get-defined-func (name &optional (args nil args-supplied))
+  (let ((defined-func (gethash name (:functions *evaluator-state*))))
+    ;; If the function cannot be found, try searching for an intrinsic function
+    (unless defined-func
+      (if args-supplied
+          ;; When there are arguments provided, look up an intrinsic dispatcher and try getting an intrinsic there
+          (let ((maybe-intrinsic-dispatcher (assoc name +intrinsic-function-dispatchers+ :test #'equal)))
+            (when maybe-intrinsic-dispatcher
+              (setf defined-func (funcall (cdr maybe-intrinsic-dispatcher) args))))
+          ;; If there are no arguments provided, the call is probably from an instruction, which doesn't know
+          ;; about the number of arguments. Look up the intrinsic table directly, since the name should already
+          ;; be the one needed
+          (setf defined-func (cdr (assoc name (:intrinsics *evaluator-state*) :test #'equal))))
+      ;; If it's still undefined, there was no intrinsic
       (unless defined-func
-        (error "Function ~A is not declared or defined" name))
+        (error "Function ~A is not declared or defined" name)))
+    defined-func))
 
-      (with-accessors ((def-args :arguments) (body :body) (def-type :return-type)) defined-func
+(defmethod translate ((func-call ast-function-call))
+  (with-accessors ((args :arguments)) func-call
+    (let ((defined-func (get-defined-func (:name func-call) (:arguments func-call))))
+      ;; Use the name of the looked-up function, since it may be an intrinsic
+      (with-accessors ((def-args :arguments) (body :body) (def-type :return-type) (name :name)) defined-func
         ;;(unless body
         ;;  (error "Function ~A is declared, but not defined" name))
 
@@ -235,19 +251,32 @@
           (let (push-args-instructions)
             (unless (zerop def-args-len)
               (loop for arg-num from 0 to (1- def-args-len)
-                do (let ((def-arg-at-n (nth arg-num def-args))
-                         (arg-at-n (nth arg-num args)))
-                     (destructuring-bind (def-arg-at-n-name . def-arg-at-n-type) def-arg-at-n
-                       (let ((mem-type-of-ast (type-of-ast arg-at-n)))
-                         (unless (memory-type-equal def-arg-at-n-type mem-type-of-ast)
-                           (error "Wrong type for argument #~A (~A) of call to ~A: expected ~A, but got ~A"
-                                  arg-num def-arg-at-n-name name (:type-name def-arg-at-n-type) (:type-name mem-type-of-ast))))
+                    do (let ((def-arg-at-n (nth arg-num def-args))
+                             (arg-at-n (nth arg-num args)))
+                         (destructuring-bind (def-arg-at-n-name . def-arg-at-n-type) def-arg-at-n
+                           (let ((mem-type-of-ast (type-of-ast arg-at-n)))
+                             (unless (memory-type-equal def-arg-at-n-type mem-type-of-ast)
+                               (error "Wrong type for argument #~A (~A) of call to ~A: expected ~A, but got ~A"
+                                      arg-num def-arg-at-n-name name (:type-name def-arg-at-n-type) (:type-name mem-type-of-ast))))
 
-                       (push (make-instance 'push-instruction :pushed-value arg-at-n) push-args-instructions)))))
+                           (push (make-instance 'push-instruction :pushed-value arg-at-n) push-args-instructions)))))
             (let ((calling-instruction (list (make-instance 'call-instruction :name name))))
               (concatenate 'list
                            push-args-instructions
                            calling-instruction))))))))
+
+(defvar +intrinsic-function-dispatchers+
+  (list (cons "+"
+              (lambda (args)
+                (when (= (length args) 2)
+                  (let ((lhs-type (type-of-ast (nth 0 args)))
+                        (rhs-type (type-of-ast (nth 1 args))))
+                    (match (cons (:type-name lhs-type) (:type-name rhs-type))
+                      ((cons "int" "int")
+                       (cdr (assoc "int+int" (:intrinsics *evaluator-state*) :test #'equal))))))))))
+
+(defun define-intrinsics ()
+  )
 
 (defclass evaluator-state ()
   ((stack :initform (make-array 16 :adjustable t :initial-element nil) :accessor :stack)
@@ -257,7 +286,24 @@
 
    (functions :initform (make-hash-table :test #'equal) :accessor :functions)
 
-   (translation-locals-types-stack :initform nil :accessor :translation-locals-types-stack)))
+   (translation-locals-types-stack :initform nil :accessor :translation-locals-types-stack)
+
+   (intrinsics :initform
+               (list (cons "int+int"
+                           (make-instance 'runtime-function
+                                          :name "int+int"
+                                          :return-type (get-standard-simple-type "int")
+                                          :arguments (list
+                                                      (cons "lhs" (get-standard-simple-type "int"))
+                                                      (cons "rhs" (get-standard-simple-type "int")))
+                                          :body (lambda ()
+                                                  (let ((lhs (pop-from-stack))
+                                                        (rhs (pop-from-stack)))
+                                                    ;; No need to save or restore the SP, since it will already be writing
+                                                    ;; onto the arguments. Just push the result onto the new position.
+                                                    (let ((sum (+ (:value lhs) (:value rhs))))
+                                                      (push-onto-stack (make-instance 'ast-integer :value sum))))))))
+               :accessor :intrinsics)))
 
 (defvar *evaluator-state*)
 
@@ -291,23 +337,26 @@
 (defmethod evaluate-instr ((instr restore-sp-instruction))
   (restore-sp))
 
-(defmethod evaluate-instr ((instr push-instruction))
+(defun push-onto-stack (value)
   (with-accessors ((sp :stack-pointer) (stack :stack)) *evaluator-state*
     (when (= sp (length stack))
       (adjust-array stack (* (length stack) 2) :initial-element nil))
-    (setf (aref stack sp) (evaluate-value (:pushed-value instr)))
+    (setf (aref stack sp) (evaluate-value value))
     (incf sp)))
 
-(defmethod evaluate-instr ((instr call-instruction))
-  (let* ((f-name (:name instr))
-         (runtime-f (gethash f-name (:functions *evaluator-state*))))
-    (when (null runtime-f)
-      (error "Undefined runtime function: ~A" f-name))
+(defmethod evaluate-instr ((instr push-instruction))
+  (push-onto-stack (:pushed-value instr)))
 
+(defmethod evaluate-instr ((instr call-instruction))
+  (let* ((runtime-f (get-defined-func (:name instr)))
+         (body (:body runtime-f)))
     (push (make-hash-table :test 'equal) (:locals-stack *evaluator-state*))
 
-    (loop for instr in (:body runtime-f)
-          do (evaluate-instr instr))
+    (ematch body
+      ((type list)
+       (map 'list #'evaluate-instr body))
+      ((type function)
+       (funcall body)))
 
     (pop (:locals-stack *evaluator-state*))))
 
