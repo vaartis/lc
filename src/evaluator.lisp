@@ -82,25 +82,29 @@
       (error "Variable ~A undefined" name))
     var-type))
 
+(defmethod type-of-ast ((ast ast-function-call))
+  (let ((defined-func (get-defined-func (:name ast) (:arguments ast))))
+    (:return-type defined-func)))
+
 (defgeneric evaluate (value))
 
-(defgeneric evaluate-value (value))
+(defgeneric evaluate-expr (value))
 
-(defmethod evaluate-value ((value ast-float))
+(defmethod evaluate-expr ((value ast-float))
   (with-accessors ((float-val :value)) value
     (let ((mem-type (type-of-ast value)))
       (make-instance 'memory-value
                      :value-type mem-type
                      :value float-val))))
 
-(defmethod evaluate-value ((value ast-integer))
+(defmethod evaluate-expr ((value ast-integer))
   (with-accessors ((int-val :value)) value
     (let ((mem-type (type-of-ast value)))
       (make-instance 'memory-value
                      :value-type mem-type
                      :value int-val))))
 
-(defmethod evaluate-value ((value ast-variable-value))
+(defmethod evaluate-expr ((value ast-variable-value))
   (let* ((name (:name value))
          (locals (car (:locals-stack *evaluator-state*)))
          (var-value (gethash name locals)))
@@ -253,7 +257,14 @@
                                (error "Wrong type for argument #~A (~A) of call to ~A: expected ~A, but got ~A"
                                       arg-num def-arg-at-n-name name (:type-name def-arg-at-n-type) (:type-name mem-type-of-ast))))
 
-                           (push (make-instance 'push-instruction :pushed-value arg-at-n) push-args-instructions)))))
+                           (destructuring-bind (arg-generation-instrs . arg-loading-place) (translate-expr arg-at-n)
+                             ;; Push the actual putting-argument-onto-the-stack with the actual arg loading place first
+                             (push (make-instance 'push-instruction :pushed-value arg-loading-place) push-args-instructions)
+
+                             ;; Push arg generation instruction backwards, since push adds them to the beginning.
+                             ;; Also, push them after the the actual loading instruction, because push works backwards
+                             (loop for instr in (reverse arg-generation-instrs)
+                                   do (push instr push-args-instructions)))))))
             (let ((calling-instruction (list (make-instance 'call-instruction :name name))))
               (concatenate 'list
                            push-args-instructions
@@ -360,7 +371,8 @@
   (with-accessors ((sp :stack-pointer) (stack :stack)) *evaluator-state*
     (when (= sp (length stack))
       (adjust-array stack (* (length stack) 2) :initial-element nil))
-    (setf (aref stack sp) (evaluate-value value))
+
+    (setf (aref stack sp) (evaluate-expr value))
     (incf sp)))
 
 (defmethod evaluate-instr ((instr push-instruction))
@@ -407,7 +419,6 @@
 
 (defmacro run (instructions)
   `(run-with-state (make-instance 'evaluator-state) ,instructions))
-
 
 (defun disasm-runtime-function (fnc)
   (loop for instr in (:body fnc)

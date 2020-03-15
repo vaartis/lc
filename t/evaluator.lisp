@@ -44,4 +44,6 @@
           (test-call-result "test_sub" "int test_sub(int x, int y) { return x - y; }" "test_sub(20, 10)" 5 10)
           (test-call-result "test_div" "int test_div(int x, int y) { return x / y; }" "test_div(20, 10)" 6 2)
           (test-call-result "test_rem" "int test_rem(int x, int y) { return x % y; }" "test_rem(1, 2)" 7 1)
-          (test-call-result "test_mul" "int test_mul(int x, int y) { return x * y; }" "test_mul(2, 10)" 8 20))))))
+          (test-call-result "test_mul" "int test_mul(int x, int y) { return x * y; }" "test_mul(2, 10)" 8 20)
+          (test-call-result "test_complex" "int test_complex(int x, int y) { return (x + (y * 2) / 3) - 1; }" "test_complex(2, 10)" 9 7)
+          (test-call-result "test_complex2" "int test_complex2(int x, int y) { return x + y * 2 / 3 - 1; }" "test_complex2(2, 10)" 10 7))))))
