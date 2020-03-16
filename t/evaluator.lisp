@@ -31,7 +31,15 @@
                (ok (= expected-result-val
                       (:value
                        (aref (:stack lc.evaluator:*evaluator-state*) (- expected-sp 1))))
-                   (format nil "returned value is ~A" expected-result-val))))))
+                   (format nil "returned value is ~A" expected-result-val)))))
+         (test-definition-throws (def-str condition)
+           (ok
+            (signals
+                (lc.evaluator::evaluate
+                 (with-context-of-string def-str
+                   (lc.parser::parse-function-definition)))
+                condition)
+            (format nil "defining ~A throws ~A" def-str condition))))
 
       (with-state (make-instance 'lc.evaluator:evaluator-state)
         (test-call-result "test1" "int test1(int x, int y) { return x; }" "test1(21, 22)" 1 21)
@@ -48,4 +56,6 @@
           (test-call-result "test_complex" "int test_complex(int x, int y) { return (x + (y * 2) / 3) - 1; }" "test_complex(2, 10)" 9 7)
           (test-call-result "test_complex2" "int test_complex2(int x, int y) { return x + y * 2 / 3 - 1; }" "test_complex2(2, 10)" 10 7))
         (testing "variable definition"
-          (test-call-result "test_def" "int test_def(int x) { int y = 2; int z = y + x; return z * 2;}" "test_def(10)" 11 24))))))
+          (test-call-result "test_def" "int test_def(int x) { int y = 2; int z = y + x; return z * 2;}" "test_def(10)" 11 24))
+        (testing "multiple definition causes an error"
+          (test-definition-throws "int test_multiple_def(int x) { int x = 1; }" 'lc.evaluator::variable-already-declared))))))

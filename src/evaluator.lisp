@@ -55,6 +55,9 @@
   (print-unreadable-object (obj out)
     (format out "save-into ~A" (:name obj))))
 
+(defun get-translation-local-variable-type (name)
+  (gethash name (car (:translation-locals-types-stack *evaluator-state*))))
+
 (defun set-translation-local-variable-type (name type)
   (symbol-macrolet ((var-in-hash (gethash name (car (:translation-locals-types-stack *evaluator-state*)))))
     (setf var-in-hash type)))
@@ -271,12 +274,36 @@
               (append push-args-instructions
                       calling-instruction))))))))
 
+(define-condition translation-error (error)
+  ((message :initarg :message)
+   (ast-object :initarg :ast-object))
+  (:report (lambda (condition stream)
+             (with-slots (message ast) condition
+               (format stream message)
+               (format stream "~2%In SLIME/Sly press C to inspect condition. The AST-OBJECT slot contains the AST object that caused the error.")))))
+
+(define-condition variable-already-declared (translation-error) ())
+
+(defun translation-error (class ast-object &rest format-args)
+  (unless (null format-args)
+    (push nil format-args))
+  (error class
+         :message (apply #'format format-args)
+         :ast-object ast-object))
+
 (defmethod translate ((var-decl ast-variable-declaration))
-  (set-translation-local-variable-type (:name var-decl) (ast-to-memory-type (:decl-type var-decl)))
-  ;; Don't return anything
-  nil)
+  (let ((name (:name var-decl)))
+    (when (get-translation-local-variable-type name)
+      (translation-error 'variable-already-declared var-decl "Variable ~A already declared" name))
+
+    (set-translation-local-variable-type name (ast-to-memory-type (:decl-type var-decl)))
+    ;; Don't return anything
+    nil))
 
 (defmethod translate ((var-def ast-variable-definition))
+  ;; Handle the case that a variable might already be defined
+  (translate (:var-decl var-def))
+
   (destructuring-bind (val-generation-instrs . val-loading-place) (translate-expr (:value var-def))
     (append
      ;; Return arg generation instruction first
