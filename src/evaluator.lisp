@@ -55,10 +55,13 @@
   (print-unreadable-object (obj out)
     (format out "save-into ~A" (:name obj))))
 
-(defun make-save-into-instruction (name type)
+(defun set-translation-local-variable-type (name type)
   (symbol-macrolet ((var-in-hash (gethash name (car (:translation-locals-types-stack *evaluator-state*)))))
-    (setf var-in-hash type)
-    (make-instance 'save-into-instruction :name name :type type)))
+    (setf var-in-hash type)))
+
+(defun make-save-into-instruction (name type)
+  (set-translation-local-variable-type name type)
+  (make-instance 'save-into-instruction :name name :type type))
 
 (defclass call-instruction (instruction)
   ((name :initarg :name
@@ -187,7 +190,7 @@
          (save-into-tmp-instr (make-save-into-instruction tmp-local-name (:return-type defined-func))))
     (cons
      ;; First, return values to generate to load the data
-     (concatenate 'list call-instrs (list save-into-tmp-instr))
+     (append call-instrs (list save-into-tmp-instr))
      ;; Second, return the what to use to actually load that data
      (make-instance 'ast-variable-value :name tmp-local-name))))
 
@@ -202,8 +205,7 @@
 
 (defmethod translate ((ret ast-return))
   (destructuring-bind (expr-generated-instrs . expr-load-value) (translate-expr (:value ret))
-    (concatenate
-     'list
+    (append
      (list
       (make-instance 'comment-instruction :comment "return begins here"))
      ;; Insert instructions generated for the returning expression
@@ -266,9 +268,25 @@
                              (loop for instr in (reverse arg-generation-instrs)
                                    do (push instr push-args-instructions)))))))
             (let ((calling-instruction (list (make-instance 'call-instruction :name name))))
-              (concatenate 'list
-                           push-args-instructions
-                           calling-instruction))))))))
+              (append push-args-instructions
+                      calling-instruction))))))))
+
+(defmethod translate ((var-decl ast-variable-declaration))
+  (set-translation-local-variable-type (:name var-decl) (ast-to-memory-type (:decl-type var-decl)))
+  ;; Don't return anything
+  nil)
+
+(defmethod translate ((var-def ast-variable-definition))
+  (destructuring-bind (val-generation-instrs . val-loading-place) (translate-expr (:value var-def))
+    (append
+     ;; Return arg generation instruction first
+     val-generation-instrs
+     (list
+      ;; Push the value of the variable onto the stack
+      (make-instance 'push-instruction :pushed-value val-loading-place)
+      (let ((decl (:var-decl var-def)))
+        ;; Push the saving into the variable onto the stack. This will also declare the variable.
+        (make-save-into-instruction (:name decl) (ast-to-memory-type (:decl-type decl))))))))
 
 (defmacro operator-intrinsic-dispatcher (op &body clauses)
   `(cons ,op
