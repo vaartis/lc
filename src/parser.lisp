@@ -1,8 +1,8 @@
 (defpackage lc.parser
   (:use :cl)
-  (:shadow :get :symbol)
+  (:shadow :get :symbol :trivia)
   (:export :parse-file :parse-type
-           :parse-function-call :parse-binary-operator
+           :parse-function-call :parse-binary-operator :parse-if-else
            :parsing-error))
 (in-package lc.parser)
 
@@ -89,14 +89,19 @@
   (let* ((char (get))
          (expect-result
            (etypecase expected
-             (standard-char (char= char expected))
+             (standard-char (equal char expected))
              (cons (some (lambda (ch) (equal char ch)) expected)))))
-    (if (not expect-result)
+    (unless expect-result
         (parsing-error "Expected ~A, but found '~A'"
                        (typecase expected
                          (standard-char (format nil "'~A'" expected))
                          (cons (format nil "~{'~A'~^ or ~}" expected)))
                        char))))
+
+(defun expect-ident (expected)
+  (let ((parsed (parse-ident)))
+    (unless (equal parsed expected)
+      (parsing-error "Expected ~A, but found '~A'" expected parsed))))
 
 (define-condition parsing-error (error)
   ((message :initarg :message :reader message)
@@ -214,9 +219,20 @@
   ((name :initarg :name :accessor :name)
    (value :initarg :value :accessor :value)))
 
+(defmethod print-object ((obj ast-variable-assignment) out)
+  (print-unreadable-object (obj out)
+    (format out "variable assignment ~A = ~A"
+            (:name obj) (:value obj))))
+
 (defclass ast-pointer-assignment (ast-variable-assignment)
   ;; TODO: figure something better out if this doesn't work well
   ((depth :initarg :depth :accessor :depth)))
+
+(defclass ast-if-else (ast-statement)
+  ((condition :initarg :condition :accessor :condition)
+   (if-body :initarg :if-body :accessor :if-body)
+   (else-body :initarg :else-body :accessor :else-body))
+  (:default-initargs :else-body nil))
 
 (defclass ast-value (ast) ())
 
@@ -434,7 +450,7 @@
   (skip-empty)
 
   (let ((return-args
-          (if (not (char= (peek) #\)))
+          (if (not (equal (peek) #\)))
               (let ((arguments '()))
                 (tagbody parse-arg
                    (let ((type (parse-type)))
@@ -443,7 +459,7 @@
                        (push (cons name type) arguments)
 
                        (skip-empty)
-                       (when (char= (peek) #\Comma)
+                       (when (equal (peek) #\Comma)
                          ;; If there is a comma afterwards, skip it, skip empty space and parse the next argument too
                          (get)
                          (skip-empty)
@@ -470,13 +486,13 @@
           (case current-char
               ;; If the declaration ends with a semicolumn, it's just a declaration
               (#\; f-decl)
-            (#\{ (let ((f-body (parse-function-body)))
+            (#\{ (let ((f-body (parse-block-body)))
                    (make-instance 'ast-function-definition
                                   :function-declaration f-decl
                                   :body f-body)))
             (otherwise (parsing-error "Expected '{' or ';' after the '~A' function declaration, but found ~A" f-name current-char))))))))
 
-(defun parse-function-body ()
+(defun parse-block-body ()
   (expect #\{)
 
   (let ((statements '()))
@@ -484,7 +500,7 @@
     ;; pushing statements into the statements list
     (loop while (progn
                   (skip-empty)
-                  (not (char= (peek) #\})))
+                  (not (equal (peek) #\})))
           do (push (parse-statement) statements))
     ;; Skip the } at the end
     (expect #\})
@@ -492,21 +508,54 @@
     ;; Revers the statement list since push works backwards
     (reverse statements)))
 
+(defun parse-if-else ()
+  (expect-ident "if")
+  (skip-empty)
+  (expect #\()
+  (let ((cond-expr (parse-expression)))
+    (expect #\))
+    (skip-empty)
+
+    (let ((if-body
+            ;; If there's a {, parse as a block. If not, then parse only one statement
+            (if (equal (peek) #\{)
+                (parse-block-body)
+                (list (parse-statement)))))
+      (skip-empty)
+      ;; If there's an else block, also parse it. It will be nil if there isn't one
+      (let ((else-body
+              (when (equal (peek-ident) "else")
+                (expect-ident "else")
+                (skip-empty)
+
+                (if (equal (peek) #\{)
+                    (parse-block-body)
+                    (list (parse-statement))))))
+        (make-instance 'ast-if-else
+                       :condition cond-expr
+                       :if-body if-body
+                       :else-body else-body)))))
+
 (defun parse-statement ()
   (let* ((next-ident (peek-ident))
+         (needs-semicolumn t)
          (statement
            (cond
+             ((equal next-ident "if")
+              (setf needs-semicolumn nil)
+              (parse-if-else))
+
              ((string= next-ident "return")
               (parse-ident)
               (skip-empty)
               (make-instance 'ast-return
                              :value (parse-expression)))
              ((or
-               (char= (peek) #\*)
+               (equal (peek) #\*)
                (let ((ident-length (length next-ident)))
                  (let ((char-after-ident (peek-nonempty ident-length)))
                    ;; TODO: handle *= /= etc.
-                   (char= char-after-ident #\=))))
+                   (equal char-after-ident #\=))))
               (parse-variable-assignment))
              ;; As a last case, try parsing as a variable definition
              (t
@@ -519,15 +568,16 @@
              ;; (t (parsing-error "Expected an identifier at the beinning of the statement, but found ~A" next-ident))
              )))
     (skip-empty)
-    (expect #\;)
+    (when needs-semicolumn
+      (expect #\;))
 
     statement))
 
 (defun parse-variable-assignment ()
   (let ((depth 0))
-    (when (char= (peek) #\*)
+    (when (equal (peek) #\*)
       (tagbody more-depth
-         (when (char= (peek) #\*)
+         (when (equal (peek) #\*)
            (get)
            (skip-empty)
            (incf depth)

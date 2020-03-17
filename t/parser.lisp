@@ -15,7 +15,7 @@
          (with-context-of-string str
            (funcall parse-f))
          error)
-     (format nil "parsing ~A throws ~A" str error))))
+     (format nil "throws ~A" error))))
 
 (deftest parse-type-test
   (labels
@@ -169,3 +169,37 @@
       (parse-throws 'parse-binary-operator "1 + 1 * 2)" 'parsing-error)
       (parse-throws 'parse-binary-operator "((1 + 1 * 2)" 'parsing-error)
       (parse-throws 'parse-binary-operator "((1 + 1) * 2))" 'parsing-error))))
+
+(deftest parse-if-else-test
+  (labels ((parsed-if-else (str cond-val if-val &optional else-val)
+             (testing str
+               (with-context-of-string str
+                 (let ((parsed (parse-if-else)))
+                   (ok (= (:value (:condition parsed)) cond-val) (format nil "condition value = ~A" cond-val))
+
+                   (testing "if body"
+                     (when (typep if-val 'integer)
+                       (setf if-val (list if-val)))
+                     (loop for n from 0 below (length if-val)
+                           do (ok (= (:value (nth n (:if-body parsed))) (nth n if-val))
+                                  (format nil "value #~A is ~A" (1+ n) (nth n if-val)))))
+                   (when else-val
+                     (testing "else body"
+                       (when (typep else-val 'integer)
+                         (setf else-val (list else-val)))
+                       (loop for n from 0 below (length else-val)
+                             do (ok (= (:value (nth n (:else-body parsed))) (nth n else-val))
+                                    (format nil "value #~A is ~A" (1+ n) (nth n else-val)))))))))))
+    (parsed-if-else "if (1) 2;" 1 2)
+    (parsed-if-else "if (1) 2; else 3;" 1 2 3)
+    (parsed-if-else "if (1) { 2; 3; }" 1 '(2 3))
+    (parsed-if-else "if (1) { 2; 3; } else { 3; 4; }" 1 '(2 3) '(3 4))
+
+    (testing "invalid if statements raise errors"
+      (parse-throws 'parse-if-else "if (" 'parsing-error)
+      (parse-throws 'parse-if-else "if ()" 'parsing-error)
+      (parse-throws 'parse-if-else "if (1) {" 'parsing-error)
+      (parse-throws 'parse-if-else "if (1) { else" 'parsing-error)
+      (parse-throws 'parse-if-else "if ) { else }" 'parsing-error)
+      (parse-throws 'parse-if-else "if (1) { else }" 'parsing-error)
+      (parse-throws 'parse-if-else "if (1) { 2 } else { 3 }" 'parsing-error))))
