@@ -247,6 +247,9 @@
 (defclass ast-float (ast-value)
   ((value :initarg :value :accessor :value)))
 
+(defclass ast-bool (ast-value)
+  ((value :initarg :value :accessor :value)))
+
 (defclass ast-variable-value (ast-value)
   ((name :initarg :name :accessor :name)))
 
@@ -305,7 +308,7 @@
 (defun str-to-keyword (str)
   (intern (string-upcase str) 'keyword))
 
-(defvar +simple-type-main-words+ '("void" "char" "int" "float" "double"))
+(defvar +simple-type-main-words+ '("void" "char" "int" "float" "double" "bool"))
 (defvar +type-modifier-words+ '("volatile" "const" "restrict"))
 (defvar +number-type-length-words+ '("short" "long"))
 (defvar +number-type-sign-words+ '("signed" "unsigned"))
@@ -783,6 +786,14 @@
          (make-instance 'ast-variable-reference-value
                         :name var-name)))
 
+      ((equal (peek-ident) "true")
+       (expect-ident "true")
+       (make-instance 'ast-bool :value t))
+
+      ((equal (peek-ident) "false")
+       (expect-ident "false")
+       (make-instance 'ast-bool :value nil))
+
       ((not (null (peek-ident)))
        ;; Depending on whether it has parens after it or not,
        ;; it can either be a variable or a function call
@@ -798,6 +809,14 @@
   (skip-empty)
   (parse-function-definition))
 
+(defun parse-toplevels ()
+  (loop until (null (peek))
+        collect (progn
+                  (skip-empty)
+                  (let ((res (parse-function-definition)))
+                    (skip-empty)
+                    res))))
+
 (defun parse-file (filename)
   (let* ((file-text
            (with-open-file (stream filename)
@@ -807,4 +826,4 @@
          (parsing-context (make-instance 'parsing-context
                                          :string file-text)))
     (let ((*context* parsing-context))
-      (parse-toplevel))))
+      (parse-toplevels))))

@@ -14,7 +14,7 @@
    :remove-from-memory
 
    :get-standard-simple-type
-   :+int-t+
+   :+int-t+ :+bool-t+ :+memory-true+ :+memory-false+
 
    :*memory*))
 (in-package lc.memory)
@@ -70,8 +70,17 @@
   (add-simple-type "char" 1)
   (add-simple-type "int" 4)
   (add-simple-type "float" 4)
+  (add-simple-type "bool" 1)
 
-  (defvar +int-t+ (get-standard-simple-type "int")))
+  (defvar +int-t+ (get-standard-simple-type "int"))
+  (defvar +bool-t+ (get-standard-simple-type "bool"))
+
+  (defvar +memory-true+ (make-instance 'memory-value
+                                       :value-type +bool-t+
+                                       :value t))
+  (defvar +memory-false+ (make-instance 'memory-value
+                                       :value-type +bool-t+
+                                       :value nil)))
 
 (defvar *memory* '())
 

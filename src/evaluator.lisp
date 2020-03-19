@@ -8,10 +8,13 @@
 (defclass runtime-function ()
   ((name :initarg :name :accessor :name)
    (arguments :initarg :arguments :accessor :arguments)
-   (body :initarg :body :accessor :body)
+   (body :initarg :body :accessor :body
+         :type (or vector function))
    (return-type :initarg :return-type :accessor :return-type
-                :type memory-type))
-  (:default-initargs :body nil))
+                :type memory-type)
+   (label-table :initarg :label-table :accessor :label-table
+                :type hash-table))
+  (:default-initargs :body nil :label-table (make-hash-table :test #'equal)))
 
 (defclass instruction () ())
 
@@ -32,6 +35,36 @@
   (print-unreadable-object (obj out)
     (format out "; ~A"
             (:comment obj))))
+
+(defclass label-instruction (instruction)
+  ((name :initarg :name :accessor :name)))
+
+(defmethod print-object ((obj label-instruction) out)
+  (print-unreadable-object (obj out)
+    (format out "label ~A:"
+            (:name obj))))
+
+(defclass exit-instruction (instruction) ())
+
+(defmethod print-object ((obj exit-instruction) out)
+  (print-unreadable-object (obj out)
+    (format out "exit")))
+
+(defclass jump-instruction (instruction)
+  ((label-name :initarg :label-name :accessor :label-name)))
+
+(defmethod print-object ((obj jump-instruction) out)
+  (print-unreadable-object (obj out)
+    (format out "jump ~A"
+            (:label-name obj))))
+
+(defclass jump-if-false-instruction (jump-instruction)
+  ((condition-value :initarg :condition-value :accessor :condition-value)))
+
+(defmethod print-object ((obj jump-if-false-instruction) out)
+  (print-unreadable-object (obj out)
+    (format out "jump-if-false ~A, ~A"
+            (:label-name obj) (:condition-value obj))))
 
 (defclass save-sp-instruction (instruction) ())
 
@@ -77,6 +110,9 @@
 (defmethod type-of-ast ((ast ast-integer))
   +int-t+)
 
+(defmethod type-of-ast ((ast ast-bool))
+  +bool-t+)
+
 (defmethod type-of-ast ((ast ast-float))
   (get-standard-simple-type "float"))
 
@@ -109,6 +145,10 @@
       (make-instance 'memory-value
                      :value-type mem-type
                      :value int-val))))
+
+(defmethod evaluate-expr ((value ast-bool))
+  (with-accessors ((val :value)) value
+    (if val +memory-true+ +memory-false+)))
 
 (defmethod evaluate-expr ((value ast-variable-value))
   (let* ((name (:name value))
@@ -155,24 +195,34 @@
 (defmethod evaluate ((func-def ast-function-definition))
   (with-accessors ((f-decl :function-declaration) (body :body)) func-def
     (let ((runtime-f-decl (evaluate f-decl)))
-      (with-accessors ((r-body :body) (r-args :arguments)) runtime-f-decl
+      (with-accessors ((r-body :body) (r-args :arguments) (r-label-table :label-table)) runtime-f-decl
+        (setf r-body (make-array (length r-body) ;; Make it at least as big as the emount of ast entries
+                                 :adjustable t
+                                 :fill-pointer 0))
 
         ;; Create a new locals types frame
         (push (make-hash-table :test #'equal) (:translation-locals-types-stack *evaluator-state*))
 
         ;; Push args
         (loop for arg in r-args
-              do (push (make-save-into-instruction (car arg) (cdr arg)) r-body))
+              do (vector-push-extend (make-save-into-instruction (car arg) (cdr arg)) r-body))
 
         ;; Put save-sp after the arguments, so when the stack is saved,
         ;; things can be written over old arguments
-        (push (make-instance 'save-sp-instruction) r-body)
+        (vector-push-extend (make-instance 'save-sp-instruction) r-body)
 
-        ;; Compile instructions and put them into the runtime function
-        (loop for instr in (alexandria:flatten (map 'list #'translate body))
-              do (push instr r-body))
+        ;; Set the dynamic variable for the function currently in translation
+        (let ((instr-number (length r-body)))
+          ;; Compile instructions and put them into the runtime function
+          (loop for instr in (alexandria:flatten (mapcar #'translate body))
+                do (progn
+                     (match instr
+                       ;; For label instructions, save their number. Since it's
+                       ((class label-instruction)
+                        (setf (gethash (:name instr) r-label-table) instr-number)))
+                     (vector-push-extend instr r-body)
+                     (incf instr-number))))
 
-        (setf r-body (reverse r-body))
 
         ;; Pop the locals types frame
         (pop (:translation-locals-types-stack *evaluator-state*))
@@ -206,6 +256,9 @@
 (defmethod translate-expr ((val ast-variable-value))
   (cons nil val))
 
+(defmethod translate-expr ((val ast-bool))
+  (cons nil val))
+
 (defmethod translate ((ret ast-return))
   (destructuring-bind (expr-generated-instrs . expr-load-value) (translate-expr (:value ret))
     (append
@@ -217,7 +270,9 @@
       ;; Reset the stack pointer
       (make-instance 'restore-sp-instruction)
       ;; Push the returned expression onto the stack
-      (make-instance 'push-instruction :pushed-value expr-load-value)))))
+      (make-instance 'push-instruction :pushed-value expr-load-value)
+      ;; Exit the function
+      (make-instance 'exit-instruction)))))
 
 (defun get-defined-func (name &optional (args nil args-supplied))
   (let ((defined-func (gethash name (:functions *evaluator-state*))))
@@ -241,7 +296,7 @@
   (with-accessors ((args :arguments)) func-call
     (let ((defined-func (get-defined-func (:name func-call) (:arguments func-call))))
       ;; Use the name of the looked-up function, since it may be an intrinsic
-      (with-accessors ((def-args :arguments) (body :body) (def-type :return-type) (name :name)) defined-func
+      (with-accessors ((def-args :arguments) (name :name)) defined-func
         ;;(unless body
         ;;  (error "Function ~A is declared, but not defined" name))
 
@@ -284,6 +339,8 @@
 
 (define-condition variable-already-declared (translation-error) ())
 
+(define-condition variable-not-declared (translation-error) ())
+
 (defun translation-error (class ast-object &rest format-args)
   (unless (null format-args)
     (push nil format-args))
@@ -306,7 +363,7 @@
 
   (destructuring-bind (val-generation-instrs . val-loading-place) (translate-expr (:value var-def))
     (append
-     ;; Return arg generation instruction first
+     ;; Return val generation instruction first
      val-generation-instrs
      (list
       ;; Push the value of the variable onto the stack
@@ -314,6 +371,56 @@
       (let ((decl (:var-decl var-def)))
         ;; Push the saving into the variable onto the stack. This will also declare the variable.
         (make-save-into-instruction (:name decl) (ast-to-memory-type (:decl-type decl))))))))
+
+(defmethod translate ((var-asgn ast-variable-assignment))
+  (with-accessors ((name :name) (value :value)) var-asgn
+    (let ((var-type (get-translation-local-variable-type name)))
+      (unless var-type
+        (translation-error 'variable-not-declared var-asgn "Variable ~A is not declared, but assigned to" name))
+      (unless (memory-type-equal var-type (type-of-ast value)))
+
+      (destructuring-bind (val-generation-instrs . val-loading-place) (translate-expr value)
+        (append
+         ;; Return val generation instruction first
+         val-generation-instrs
+         (list
+          ;; Push the value of the variable onto the stack
+          (make-instance 'push-instruction :pushed-value val-loading-place)
+          ;; Push the saving into the variable onto the stack.
+          (make-save-into-instruction name var-type)))))))
+
+(defmethod translate ((if-else ast-if-else))
+  (with-accessors ((condition :condition) (if-body :if-body) (else-body :else-body)) if-else
+    (destructuring-bind (cond-val-generation-instrs . cond-val-loading-place) (translate-expr condition)
+      (let* ((current-number-of-labels (:global-label-count *evaluator-state*))
+             (after-if-label-name (format nil "$after_if_~A" current-number-of-labels))
+             (after-if-label (make-instance 'label-instruction :name after-if-label-name))
+             ;; The label after the else, that should be jumped to when `if-body' finishes
+             (after-else-label-name (format nil "$after_else_~A" current-number-of-labels))
+             (after-else-label (make-instance 'label-instruction :name after-else-label-name)))
+        (incf (:global-label-count *evaluator-state*))
+
+        (append
+         ;; Generate condition value
+         cond-val-generation-instrs
+         ;; jump-if-false to the end of the if
+         (list
+          (make-instance 'jump-if-false-instruction :label-name after-if-label-name :condition-value cond-val-loading-place))
+         ;; Generate `if-body'
+         (alexandria:flatten (mapcar #'translate if-body))
+         ;; Jump to after the else if the if the main branch is executed
+         (when else-body
+           (list (make-instance 'jump-instruction :label-name after-else-label-name)))
+         (list
+          ;; Put in the after-if-label
+          after-if-label)
+         ;; Generate the `else-body' if it exists
+         (when else-body
+           (append
+            ;; Generate the body
+            (alexandria:flatten (mapcar #'translate else-body))
+            ;; Generate the after-else label
+            (list after-else-label))))))))
 
 (defmacro operator-intrinsic-dispatcher (op &body clauses)
   `(cons ,op
@@ -359,6 +466,8 @@
    (functions :initform (make-hash-table :test #'equal) :accessor :functions)
 
    (translation-locals-types-stack :initform nil :accessor :translation-locals-types-stack)
+
+   (global-label-count :initform 0 :accessor :global-label-count)
 
    (intrinsics :initform
                (list (lambda-op-intrinsic "int+int" (+int-t+ +int-t+ +int-t+) (lhs rhs)
@@ -429,8 +538,9 @@
     (push (make-hash-table :test 'equal) (:locals-stack *evaluator-state*))
 
     (ematch body
-      ((type list)
-       (map 'list #'evaluate-instr body))
+      ;; If the body is a vector of instructions, pass evaluation to `evaluate-function'
+      ((type vector)
+       (evaluate-function runtime-f))
       ((type function)
        (let (args)
          (loop for n from 1 to (length (:arguments runtime-f))
@@ -445,10 +555,52 @@
 
     (pop (:locals-stack *evaluator-state*))))
 
+(defmethod evaluate-function ((func runtime-function))
+  (with-accessors ((func-name :name) (func-instrs :body) (label-table :label-table)) func
+    (let ((n 0))
+      (loop while (< n (length func-instrs))
+            for current-instr = (elt func-instrs n)
+            do (ematch current-instr
+                 ((class jump-if-false-instruction)
+                  (let* ((label-name (:label-name current-instr))
+                         (found-label-num (gethash label-name label-table)))
+                    ;; Maybe this should be moved to compile-time/translation time somehow
+                    (unless found-label-num
+                      (error "Label ~A not found in function ~A" label-name func-name))
+                    ;; Set N to the new position determined by `evaluate-jump-if-false'
+                    (setf n (evaluate-jump-if-false current-instr n found-label-num))))
+                 ((class jump-instruction)
+                  (let* ((label-name (:label-name current-instr))
+                         (found-label-num (gethash label-name label-table)))
+                    (unless found-label-num
+                      (error "Label ~A not found in function ~A" label-name func-name))
+                    ;; Set N to the label position unconditionally
+                    (setf n found-label-num)))
+                 ((class exit-instruction)
+                  ;; Stop evaluation after this. If the function reaches its end, this is not required
+                  (loop-finish))
+                 ((class instruction)
+                  ;; Evaluate the instruction and increment the next instruction number
+                  (evaluate-instr current-instr)
+                  (incf n)))))))
+
 (defmethod evaluate-instr ((instr save-into-instruction))
   (setf (gethash (:name instr)
                  (car (:locals-stack *evaluator-state*)))
         (pop-from-stack)))
+
+;; Deliberately left empty
+(defmethod evaluate-instr ((instr label-instruction)))
+
+(defun evaluate-jump-if-false (jump-instr current-pos label-pos)
+  (let ((cond-result (evaluate-expr (:condition-value jump-instr))))
+    (unless (memory-type-equal (:value-type cond-result) +bool-t+)
+      (error "~A in an evaluate-jump-false was not a boolean" cond-result))
+    (if (:value cond-result)
+        ;; If result is true, do not jump, just proceed to the next instruction
+        (1+ current-pos)
+        ;; If result is false, jump to the label instruction
+        label-pos)))
 
 (defmacro with-state (state &body rest)
   `(let ((*evaluator-state* ,state))
@@ -456,7 +608,7 @@
 
 (defun run-with-current-state (instructions)
   (loop for instr in instructions
-          do (evaluate-instr instr)))
+        do (evaluate-instr instr)))
 
 (defmacro run-with-state (state instructions)
   `(with-state ,state
@@ -466,5 +618,19 @@
   `(run-with-state (make-instance 'evaluator-state) ,instructions))
 
 (defun disasm-runtime-function (fnc)
-  (loop for instr in (:body fnc)
+  (loop for instr across (:body fnc)
         do (print instr)))
+
+(defun test ()
+  (with-state (make-instance 'lc.evaluator:evaluator-state)
+    (loop for f in (parse-file "test.c")
+          do (evaluate f))
+
+    (disasm-runtime-function (gethash "test" (:functions lc.evaluator::*evaluator-state*)))
+
+    (run-with-current-state
+     (translate
+      (let ((lc.parser::*context* (make-instance 'lc.parser::parsing-context :string "test(21)")))
+        (lc.parser::parse-function-call))))
+
+    *evaluator-state*))
