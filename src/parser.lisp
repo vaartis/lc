@@ -104,21 +104,22 @@
       (parsing-error "Expected ~A, but found '~A'" expected parsed))))
 
 (define-condition parsing-error (error)
-  ((message :initarg :message :reader message)
-   (symbol :initarg :symbol :reader symbol)
-   (line :initarg :line :reader line))
+  ((message :initarg :message)
+   (symbol :initarg :symbol)
+   (line :initarg :line)
+   (context :initarg :context))
   (:report (lambda (condition stream)
-             (with-slots (message symbol line) condition
+             (with-slots (message symbol line context) condition
                (format stream "~A at line ~A, symbol ~A~%" message line symbol)
                (let* ((line-specifier (format nil "~A| " line))
                       (line-specifier-length (length line-specifier)))
-                 (format stream "~A~A~%" line-specifier (get-line-at line))
+                 (format stream "~A~A~%" line-specifier (get-line-at line context))
                  ;; Write a ^ showing the position, skipping the first
                  (loop repeat (1- (+ line-specifier-length symbol)) do (write-char #\Space stream))
                  (write-char #\^ stream))))))
 
-(defun get-line-at (line-num)
-  (with-slots (inner-string) *context*
+(defun get-line-at (line-num context)
+  (with-slots (inner-string) context
     (loop for position = 0 then (1+ position)
           while (< position (length inner-string))
           for current-char = (aref inner-string position)
@@ -136,7 +137,8 @@
     (error 'parsing-error
            :message (apply #'format format-args)
            :symbol symbol
-           :line line)))
+           :line line
+           :context *context*)))
 
 (defvar +skip-chars+ '(#\Newline #\Space))
 (defun skip-empty ()
