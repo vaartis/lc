@@ -1,9 +1,11 @@
 (asdf:defsystem #:lc
   :pathname "src"
-  :depends-on (:parse-float :closer-mop :trivia)
+  :depends-on (:parse-float :closer-mop :trivia :lazy)
   :components
-  ((:file "memory")
-   (:file "parser")
+  ((:file "parser")
+   (:file "memory")
+   (:file "runtime-function")
+   (:file "intrinsics")
    (:file "evaluator")))
 
 (asdf:defsystem #:lc/test

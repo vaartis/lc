@@ -1,5 +1,5 @@
 (defpackage lc.memory
-  (:use :cl)
+  (:use :cl :lc.parser)
   (:export
 
    :memory-type
@@ -15,6 +15,7 @@
 
    :get-standard-simple-type
    :+int-t+ :+bool-t+ :+memory-true+ :+memory-false+
+   :type-of-ast
 
    :*memory*))
 (in-package lc.memory)
@@ -116,3 +117,14 @@
       (put-into-memory (make-instance 'memory-value
                                       :value-type (get-standard-simple-type "char")
                                       :value char)))))
+
+(defgeneric type-of-ast (ast))
+
+(defmethod type-of-ast ((ast ast-integer))
+  +int-t+)
+
+(defmethod type-of-ast ((ast ast-bool))
+  +bool-t+)
+
+(defmethod type-of-ast ((ast ast-float))
+  (get-standard-simple-type "float"))

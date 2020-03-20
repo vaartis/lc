@@ -1,20 +1,13 @@
 (defpackage lc.evaluator
-  (:use :cl :lc.parser :lc.memory :trivia)
+  (:use :cl :trivia
+        :lc.parser :lc.memory :lc.evaluator.intrinsics :lc.evaluator.runtime-function)
   (:export :run :run-with-state :run-with-current-state :with-state
            :evaluator-state :*evaluator-state*
+           :runtime-function
            :translate))
 (in-package lc.evaluator)
 
-(defclass runtime-function ()
-  ((name :initarg :name :accessor :name)
-   (arguments :initarg :arguments :accessor :arguments)
-   (body :initarg :body :accessor :body
-         :type (or vector function))
-   (return-type :initarg :return-type :accessor :return-type
-                :type memory-type)
-   (label-table :initarg :label-table :accessor :label-table
-                :type hash-table))
-  (:default-initargs :body nil :label-table (make-hash-table :test #'equal)))
+
 
 (defclass instruction () ())
 
@@ -106,15 +99,6 @@
 (defmethod print-object ((obj call-instruction) out)
   (print-unreadable-object (obj out)
     (format out "call ~A" (:name obj))))
-
-(defmethod type-of-ast ((ast ast-integer))
-  +int-t+)
-
-(defmethod type-of-ast ((ast ast-bool))
-  +bool-t+)
-
-(defmethod type-of-ast ((ast ast-float))
-  (get-standard-simple-type "float"))
 
 (defmethod type-of-ast ((ast ast-variable-value))
   (let* ((name (:name ast))
@@ -278,15 +262,15 @@
   (let ((defined-func (gethash name (:functions *evaluator-state*))))
     ;; If the function cannot be found, try searching for an intrinsic function
     (unless defined-func
-      (if args-supplied
-          ;; When there are arguments provided, look up an intrinsic dispatcher and try getting an intrinsic there
-          (let ((maybe-intrinsic-dispatcher (assoc name +intrinsic-function-dispatchers+ :test #'equal)))
-            (when maybe-intrinsic-dispatcher
-              (setf defined-func (funcall (cdr maybe-intrinsic-dispatcher) args))))
-          ;; If there are no arguments provided, the call is probably from an instruction, which doesn't know
-          ;; about the number of arguments. Look up the intrinsic table directly, since the name should already
-          ;; be the one needed
-          (setf defined-func (cdr (assoc name (:intrinsics *evaluator-state*) :test #'equal))))
+      (setf
+       defined-func
+       (if args-supplied
+           ;; When there are arguments provided, look up an intrinsic dispatcher and try getting an intrinsic there
+           (dispatch-intrinsic name args)
+           ;; If there are no arguments provided, the call is probably from an instruction, which doesn't know
+           ;; about the number of arguments. Look up the intrinsic table directly, since the name should already
+           ;; be the one needed
+           (intrinsic-from-actual-name name)))
       ;; If it's still undefined, there was no intrinsic
       (unless defined-func
         (error "Function ~A is not declared or defined" name)))
@@ -422,41 +406,6 @@
             ;; Generate the after-else label
             (list after-else-label))))))))
 
-(defmacro operator-intrinsic-dispatcher (op &body clauses)
-  `(cons ,op
-         (lambda (args)
-           (when (= (length args) 2)
-             (let ((lhs-type (type-of-ast (nth 0 args)))
-                   (rhs-type (type-of-ast (nth 1 args))))
-               (match (cons (:type-name lhs-type) (:type-name rhs-type))
-                 ,@(loop for clause in clauses
-                         collect (destructuring-bind (rhs-t lhs-t) clause
-                                   `((cons ,rhs-t ,lhs-t)
-                                     (cdr (assoc ,(format nil "~A~A~A" rhs-t op lhs-t) (:intrinsics *evaluator-state*) :test #'equal)))))))))))
-
-(defvar +intrinsic-function-dispatchers+
-  (list
-   (operator-intrinsic-dispatcher "+"
-     ("int" "int"))
-   (operator-intrinsic-dispatcher "-"
-     ("int" "int"))
-   (operator-intrinsic-dispatcher "/"
-     ("int" "int"))
-   (operator-intrinsic-dispatcher "%"
-     ("int" "int"))
-   (operator-intrinsic-dispatcher "*"
-     ("int" "int"))))
-
-(defmacro lambda-op-intrinsic (name (lhs-type rhs-type ret-type) (lhs-name rhs-name) &body body)
-  `(cons ,name
-         (make-instance 'runtime-function
-                        :name ,name
-                        :return-type ,ret-type
-                        :arguments `(("lhs" . ,,lhs-type)
-                                     ("rhs" . ,,rhs-type))
-                        :body (lambda (,lhs-name ,rhs-name)
-                                ,@body))))
-
 (defclass evaluator-state ()
   ((stack :initform (make-array 16 :adjustable t :initial-element nil) :accessor :stack)
    (stack-pointer :initform 0 :accessor :stack-pointer)
@@ -467,27 +416,7 @@
 
    (translation-locals-types-stack :initform nil :accessor :translation-locals-types-stack)
 
-   (global-label-count :initform 0 :accessor :global-label-count)
-
-   (intrinsics :initform
-               (list (lambda-op-intrinsic "int+int" (+int-t+ +int-t+ +int-t+) (lhs rhs)
-                       (make-instance 'ast-integer
-                                      :value (+ (:value lhs) (:value rhs))))
-                     (lambda-op-intrinsic "int-int" (+int-t+ +int-t+ +int-t+) (lhs rhs)
-                       (make-instance 'ast-integer
-                                      :value (- (:value lhs) (:value rhs))))
-                     (lambda-op-intrinsic "int/int" (+int-t+ +int-t+ +int-t+) (lhs rhs)
-                       (make-instance 'ast-integer
-                                      :value (floor (:value lhs) (:value rhs))))
-                     (lambda-op-intrinsic "int%int" (+int-t+ +int-t+ +int-t+) (lhs rhs)
-                       (multiple-value-bind (div remainder) (floor (:value lhs) (:value rhs))
-                         (declare (ignore div))
-                         (make-instance 'ast-integer
-                                        :value remainder)))
-                     (lambda-op-intrinsic "int*int" (+int-t+ +int-t+ +int-t+) (lhs rhs)
-                       (make-instance 'ast-integer
-                                      :value (* (:value lhs) (:value rhs)))))
-               :accessor :intrinsics)))
+   (global-label-count :initform 0 :accessor :global-label-count)))
 
 (defvar *evaluator-state*)
 
@@ -626,11 +555,11 @@
     (loop for f in (parse-file "test.c")
           do (evaluate f))
 
-    (disasm-runtime-function (gethash "test" (:functions lc.evaluator::*evaluator-state*)))
+    ;;(disasm-runtime-function (gethash "test" (:functions lc.evaluator::*evaluator-state*)))
 
     (run-with-current-state
      (translate
-      (let ((lc.parser::*context* (make-instance 'lc.parser::parsing-context :string "test(21)")))
+      (let ((lc.parser::*context* (make-instance 'lc.parser::parsing-context :string "test_add(21,9)")))
         (lc.parser::parse-function-call))))
 
     *evaluator-state*))
