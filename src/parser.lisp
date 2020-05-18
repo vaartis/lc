@@ -1,17 +1,34 @@
 (defpackage lc.parser
-  (:use :cl)
-  (:shadow :get :symbol :trivia)
+  (:use :cl :trivia)
+  (:shadow :get :symbol)
   (:export :parse-file :parse-type
-           :parse-function-call :parse-binary-operator :parse-if-else
+           :parse-function-call :parse-binary-operator :parse-if-else :parse-toplevel :parse-toplevels
            :parsing-error))
 (in-package lc.parser)
+
+(defclass macro-definition ()
+  ((name :initarg :name :accessor :name)
+   (args :initarg :arguments :accessor :arguments)
+   (value :initarg :value :accessor :value)))
 
 (defclass parsing-context ()
   ((inner-string :initarg :string :accessor :inner-string)
    (position :initarg :position :accessor :position))
   (:default-initargs :position 0))
 
+(defun save-position-data ()
+  (:position *context*))
+
+(defun load-position-data (pos)
+  (setf (:position *context*) pos))
+
 (defvar *context*)
+
+(defun make-preproc-macro (name value &key args)
+  (make-instance 'macro-definition
+                 :name name
+                 :arguments args
+                 :value value))
 
 (defun get (&optional (advance-by 1))
   "Get the next character and advance the position"
@@ -20,6 +37,10 @@
       (incf position advance-by)
 
       val)))
+
+(defun back (&optional (n 1))
+  ;; Go N characters back
+  (decf (:position *context*) n))
 
 (defun peek (&optional (peek-by 0))
   "Get the next character without advancing the position"
@@ -34,7 +55,7 @@
   (loop for skipped-chars = peek-by then (1+ skipped-chars)
         for current-char = (peek skipped-chars)
         when (or (null current-char) ; If we're at the end just return nil
-                 (not (find current-char +skip-chars+)))
+                 (not (find current-char *skip-chars*)))
           return current-char))
 
 (defun peek-nonempty-string (&key (peek-by 0) (only-chars nil only-chars-provided) (max-length nil max-length-provided))
@@ -168,11 +189,11 @@
            :message (apply #'format format-args)
            :context *context*)))
 
-(defvar +skip-chars+ '(#\Newline #\Space))
+(defvar *skip-chars* '(#\Newline #\Space))
 (defun skip-empty ()
   "Skips empty tokens like spaces and newlines"
   (loop for ch = (peek)
-        while (find ch +skip-chars+)
+        while (find ch *skip-chars*)
         do (get)))
 
 (defun first-character-p (char)
@@ -186,19 +207,20 @@
 
 (defvar +numeric-chars+ (coerce "1234567890" 'list))
 (defun numeric-char-p (char)
-  (find char +numeric-chars+))
+  (find char +numeric-chars+ :test #'equal))
 
 (defun parse-ident ()
   (let ((first-char (get)))
-
-    (unless (alpha-char-p first-char)
-      (parsing-error "Expected the first identifier character to be an alpha character, but got '~A'" first-char))
+    (when (null first-char)
+      (parsing-error "Expected a character to begin an identifier, but reached the end of file"))
+    (unless (or (alpha-char-p first-char) (equal first-char #\_))
+      (parsing-error "Expected the first identifier character to be an alpha character or an underscore, but got '~A'" first-char))
 
     (let* ((rest-list (loop for ch = (peek)
-                      while (ident-character-p ch)
-                      collect (progn
-                                (get)
-                                ch)))
+                            while (ident-character-p ch)
+                            collect (progn
+                                      (get)
+                                      ch)))
            (rest (coerce rest-list 'string)))
       (format nil "~A~A" first-char rest))))
 
@@ -856,17 +878,251 @@
       (t
        (parsing-error "Unrecognized expression")))))
 
+(def-unwindable-parser parse-fn-like-define ()
+  (let ((f-name (parse-ident)))
+    (skip-empty)
+    (expect #\()
+    (let ((f-args '()))
+      (tagbody next-arg
+         (skip-empty)
+         (unless (equal (peek) #\))
+           ;; Parse input variable names
+           (push (parse-ident) f-args)
+           (skip-empty)
+           (let ((next-char (peek)))
+             (expect '(#\, #\)))
+             (when (equal next-char #\,)
+               (go next-arg)))))
+      (cons f-name (reverse f-args)))))
+
+(defun parse-fn-like-define-call (expected-name)
+  (let ((f-name (parse-ident)))
+    ;; Return nothing if the name is different
+    (unless (equal f-name expected-name)
+      (return-from parse-fn-like-define-call))
+    (skip-empty)
+    ;; If the next token isn't an opening bracket, it may be a variable of the same name
+    (unless (equal (get) #\()
+      (return-from parse-fn-like-define-call))
+    (let ((f-args '()))
+      (tagbody
+       next-arg
+         (let ((unclosed-parens 0)
+               (accumulated-value (make-array '(0) :element-type 'base-char :adjustable t)))
+           (loop for curr-char = (get)
+                 do (progn
+                      (case curr-char
+                        ;; Increase the number of unclosed parens and let the paren be added to the accumulator
+                        (#\( (incf unclosed-parens))
+                        ;; The comma inside an unclosed paren counts as the value inside, not as a separator,
+                        ;; so it will be pushed to the accumulator afterwards
+                        (#\, (when (zerop unclosed-parens)
+                               (progn
+                                 ;; Argument ends here, push the accumulator and start processing the next argument
+                                 (push accumulated-value f-args)
+                                 (go next-arg))))
+                        (#\) (if (zerop unclosed-parens)
+                                 (progn
+                                   ;; Call ends here, push the saved value and exit
+                                   (push accumulated-value f-args)
+                                   (go last-arg-processed))
+                                 ;; Decrease the number of unclosed parens and add it to the accumulator
+                                 (decf unclosed-parens)))
+                        ((nil) (parsing-error "Reached the end of input while processing a call to a function-like macro ~A" expected-name)))
+                      ;; If control reaches here, push the char into the accumulator
+                      (vector-push-extend curr-char accumulated-value))))
+       last-arg-processed
+         ;; Reverse the argument list and return it
+         (return-from parse-fn-like-define-call (reverse f-args))))))
+
+(defun for-each-char-until-define-end (fnc)
+  (loop for curr-char = (get)
+        ;; Break if the end of the file is reached
+        until (null curr-char)
+        do (progn
+             (cond
+               ((and (equal curr-char #\\)
+                     (equal (peek-nonempty) #\Newline))
+
+                ;; Skip until after the newline
+                (loop until (equal curr-char #\Newline)
+                      do (setf curr-char (get)))
+                (setf curr-char (get)))
+               ;; If a newline is not escaped, exit
+               ((equal curr-char #\Newline)
+                (loop-finish)))
+             (funcall fnc curr-char))))
+
+(defun parse-define-directive ()
+  (flet ((parse-body ()
+           (let ((value (make-array '(0) :element-type 'base-char :adjustable t)))
+             (skip-empty)
+             (for-each-char-until-define-end
+              (lambda (curr-char)
+                (vector-push-extend curr-char value)))
+             value)))
+    (let* ((*should-unwind* t)
+           ;; Since a function-like macro definition is similiar to a function call, parse it like one
+           (maybe-function-like (parse-fn-like-define)))
+      (if maybe-function-like
+          (destructuring-bind (name . arg-names) maybe-function-like
+            (make-preproc-macro name (parse-body) :args arg-names))
+          ;; If it's not a function-like macro, parse the name and the rest of the body
+          (make-preproc-macro (parse-ident) (parse-body))))))
+
+(defun insert-instead-string (str-to-operate str-to-ins before-first-char after-last-char)
+  (concatenate 'string
+               (subseq str-to-operate 0 before-first-char)
+               str-to-ins
+               (subseq str-to-operate after-last-char)))
+
+(defun insert-instead (str before-first-char after-last-char)
+  (symbol-macrolet ((inner-string (:inner-string *context*)))
+    (setf inner-string
+          (insert-instead-string inner-string str before-first-char after-last-char))))
+
+(defun preprocess-directive ()
+  (let ((pos-before-directive (save-position-data)))
+    (expect #\#)
+    (skip-empty)
+    (let* ((dir-name (parse-ident))
+           (*skip-chars* '(#\Space)))
+      (flet ((parse-expressions ()
+               (loop for next-nonempt = (peek-nonempty)
+                     until (or (equal next-nonempt #\Newline)
+                               (null next-nonempt))
+                     for expr = (parse-expression)
+                     collect expr)))
+        (skip-empty)
+        (match dir-name
+          ("pragma"
+           (parse-expressions)
+           nil)
+          ("define"
+           (let* ((parsed-define (parse-define-directive))
+                  (pos-after-define (save-position-data)))
+             ;; Cut the define out
+             (insert-instead "" pos-before-directive pos-after-define)
+             ;; Reset the position
+             (load-position-data pos-before-directive)
+             ;; Now process the rest with the define applied
+             (preprocess-define-directive parsed-define)
+             ;; And reset the position again
+             (load-position-data pos-before-directive)
+
+             (:inner-string *context*)))
+          (otherwise
+           (parsing-error "Invalid preprocessor directive ~A found" dir-name)))))))
+
+
+
+(defun preprocess-define-directive (parsed-define)
+  (with-accessors ((name :name) (args :arguments) (value :value)) parsed-define
+    (flet ((try-replacing (&key fn-like-args)
+             (if args
+               (let* ((before-pos (save-position-data))
+                      (maybe-parsed-call-args (parse-fn-like-define-call name))
+                      (after-pos (save-position-data)))
+                 (when maybe-parsed-call-args
+                   (unless (= (length args) (length maybe-parsed-call-args))
+                     (parsing-error "Function-like macro ~A called with ~A args, but expects ~A"
+                                    name (length maybe-parsed-call-args) (length args)))
+
+                   ;; Replace the call with the unsubstituted value
+                   (insert-instead value before-pos after-pos)
+                   ;; Restore the position to before the call
+                   (load-position-data before-pos)
+
+                   (let ((arg-values (loop for n from 0 below (length args)
+                                           collect (cons (nth n args) (nth n maybe-parsed-call-args)))))
+                     (let ((starting-position (save-position-data))
+                           (value-length (length value)))
+                       (loop while (< (- (save-position-data) starting-position) value-length)
+                             do (let ((char-at-pos (peek)))
+                                  (if (first-character-p char-at-pos)
+                                      (let* ((pos-before-ident (save-position-data))
+                                             (parsed-ident (parse-ident))
+                                             (pos-after-ident (save-position-data))
+                                             (maybe-found-arg-value (find parsed-ident arg-values :test #'equal :key #'car)))
+                                        (when (and maybe-found-arg-value
+                                                   (or (not fn-like-args)
+                                                       (not (find parsed-ident fn-like-args :test #'equal))))
+                                          (insert-instead (cdr maybe-found-arg-value) pos-before-ident pos-after-ident)
+                                          ;; Change the size to account for the different in lengths of
+                                          ;; the argument name and value
+                                          (decf value-length (- (length (car maybe-found-arg-value))
+                                                                (length (cdr maybe-found-arg-value))))
+                                          ;; Set the position right after the replaced data
+                                          (load-position-data (+ pos-before-ident
+                                                                 (length (cdr maybe-found-arg-value))))))
+                                      ;; Skip the character
+                                      (get))))))))
+               (let* ((before-ident-pos (save-position-data))
+                      (parsed-ident (parse-ident))
+                      (after-ident-pos (save-position-data)))
+                 (when (equal parsed-ident name)
+                   ;; If either we're not inside a function-like define,
+                   ;; or the name is not one of the macro's argument names,
+                   ;; replace the identifier with the macro value
+                   (if (or (not fn-like-args)
+                           (and fn-like-args
+                                (not (find parsed-ident fn-like-args :test #'equal))))
+                       (insert-instead value before-ident-pos after-ident-pos)))))))
+      (loop for curr-char = (peek)
+            until (null curr-char)
+            do (progn
+                 (cond
+                   ((equal curr-char #\#)
+                    (get)
+                    (ematch (parse-ident)
+                      ("pragma"
+                       ;; Skip to the next line
+                       (loop for cr = (get)
+                             until (or (equal cr #\Newline)
+                                       (null cr))))
+                      ("define"
+                       (skip-empty)
+                       (let* ((*should-unwind* t)
+                              (maybe-function-like (parse-fn-like-define)))
+                         (if maybe-function-like
+                             (destructuring-bind (name . arg-names) maybe-function-like
+                               ;; Name is not important here
+                               (declare (ignore name))
+                               ;; Try replacing the values inside the define body,
+                               ;; but not replacing the identifiers that are named like
+                               ;; fn-like define arguments
+                               (for-each-char-until-define-end
+                                (lambda (curr-char)
+                                  (when (first-character-p curr-char)
+                                    ;; Go back that one character and try replacing the identifier
+                                    (back)
+                                    (try-replacing :fn-like-args arg-names)))))
+                             ;; If it's not a function-like macro, just skip the name
+                             (parse-ident))))))
+                   ((first-character-p curr-char)
+                    ;; If the character is a beginning of an identifier, try replacing it with a macro
+                    (try-replacing))
+                   (t
+                    ;; Skip the charcter
+                    (get))))))))
+
 (defun parse-toplevel ()
   (skip-empty)
-  (parse-function-definition))
+  (case (peek)
+    (#\#
+     (preprocess-directive))
+    (t
+     (parse-function-definition))))
 
 (defun parse-toplevels ()
-  (loop until (null (peek))
-        collect (progn
-                  (skip-empty)
-                  (let ((res (parse-function-definition)))
-                    (skip-empty)
-                    res))))
+  (remove-if
+   #'null
+   (loop until (null (peek))
+         collect (progn
+                   (skip-empty)
+                   (let ((res (parse-toplevel)))
+                     (skip-empty)
+                     res)))))
 
 (defun parse-file (filename)
   (let* ((file-text

@@ -203,3 +203,35 @@
                     '("if (" "if ()" "if (1) {" "if (1) { else" "if ) { else }"
                       "if (1) { else }" "if (1) { 2 } else { 3 }")
                     'parsing-error))))
+
+(deftest preprocessor-test
+  (labels
+      ((preprocessed-equal (str expected &key (parse-times 1))
+         (with-context-of-string str
+           (dotimes (time parse-times)
+             (parse-toplevel))
+           (ok (equal (:inner-string lc.parser::*context*) expected)
+               (format nil "Processed output is \"~A\"" expected)))))
+    (testing "pragma is understood"
+      (preprocessed-equal "#pragma test" "#pragma test"))
+    (testing "invalid directive throws an error"
+      (parse-throws 'parse-toplevel "#invalid" 'parsing-error))
+    (testing "define directive"
+      (testing "simple defines are replaced correcly"
+        (preprocessed-equal (format nil "#define VALUE 21~%VALUE") "21")
+        (preprocessed-equal (format nil "#define VALUE 21~%#define VALUE2 VALUE 22~%VALUE2") "21 22" :parse-times 2)
+        (testing "simple defines don't replace function-like defines arguments"
+          (preprocessed-equal (format nil "#define VALUE 21~%#define INSVAL(VALUE) VALUE~%INSVAL(38)") "38" :parse-times 2)))
+      (testing "function-like defines are replaced correctly"
+        (preprocessed-equal (format nil "#define DEF(RET_TYPE, NAME) RET_TYPE NAME() {}~%DEF(int, main)") "int  main() {}"))
+      (testing "function-like defines don't replace other function-like defines arguments"
+        (preprocessed-equal (format nil "#define VALUE1(VALUE) VALUE~%#define INSVAL(VALUE1) VALUE1~%INSVAL(38)") "38" :parse-times 2))
+      (testing "a combination of simple and function-like defines works"
+        (preprocessed-equal (format nil "#define VALUE 1~%#define DEF(INS) VALUE INS 3~%DEF(2)") "1 2 3" :parse-times 2))
+      (testing "two function-like defines combine values"
+        (preprocessed-equal (format nil "#define FNC1(X) X~%#define FNC2(X) FNC1(X)~%FNC2(22)") "22" :parse-times 2)
+        (preprocessed-equal (format nil "#define FNC1(X) X~%#define FNC2(Y) FNC1(Y)~%FNC2(23)") "23" :parse-times 2))
+      (testing "invalid function-like define calls are pasing errors"
+        (parse-throws 'parse-toplevel (format nil "#define FNC1(X) X~%FNC1(") 'parsing-error)
+        (parse-throws 'parse-toplevel (format nil "#define FNC1(X) X~%FNC1(1") 'parsing-error)
+        (parse-throws 'parse-toplevel (format nil "#define FNC1(X) X~%FNC1(1,") 'parsing-error)))))
