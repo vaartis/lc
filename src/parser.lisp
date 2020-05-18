@@ -660,23 +660,23 @@
     (format out "operator ~A"
             (:name obj))))
 
-(defun make-operator (name precedence is-r)
+(defun make-operator (name precedence &optional is-r)
   ;; 15 is the total amount of different precedences in C, +1 to make just using minus here work
   ;; Reference: https://en.cppreference.com/w/c/language/operator_precedence
   (make-instance 'operator :name name :precedence (- 16 precedence) :is-r is-r))
 
 (defvar +binary-operators+
   (list
-   (make-operator "*" 3 nil)
-   (make-operator "/" 3 nil)
-   (make-operator "%" 3 nil)
+   (make-operator "*" 3)
+   (make-operator "/" 3)
+   (make-operator "%" 3)
 
-   (make-operator "+" 4 nil)
-   (make-operator "-" 4 nil)
+   (make-operator "+" 4)
+   (make-operator "-" 4)
 
    ;; This isn't really right, but it makes things work
-   (make-operator "(" 15 nil)
-   (make-operator ")" 15 nil)))
+   (make-operator "(" 15)
+   (make-operator ")" 15)))
 
 (def-unwindable-parser parse-binary-operator ()
   (let (result-queue operator-stack)
