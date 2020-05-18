@@ -325,16 +325,19 @@
 (defmacro def-unwindable-parser (name (&rest params) &body body)
   "Defines a parser function that, if a parsing-error is signaled, will unwind the parser
    and return nil. Otherwise works like a normal defun."
-  (let ((unwind-position-name (gensym "unwind-position")))
+  (let ((unwind-position-name (gensym "UNWIND-POSITION"))
+        (body-name (gensym "BODY")))
     `(defun ,name (,@params)
-       (if *should-unwind*
-           (let ((,unwind-position-name (slot-value *context* 'position)))
-             (handler-case
-                 (progn ,@body)
-               (parsing-error ()
-                 (setf (slot-value *context* 'position) ,unwind-position-name)
-                 nil)))
-           (progn ,@body)))))
+       (flet ((,body-name ()
+                ,@body))
+         (if *should-unwind*
+             (let ((,unwind-position-name (slot-value *context* 'position)))
+               (handler-case
+                   (,body-name)
+                 (parsing-error ()
+                   (setf (slot-value *context* 'position) ,unwind-position-name)
+                   nil)))
+             (,body-name))))))
 
 (defun parse-type ()
   (let ((type-parts ())
