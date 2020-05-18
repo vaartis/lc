@@ -37,6 +37,31 @@
                  (not (find current-char +skip-chars+)))
           return current-char))
 
+(defun peek-nonempty-string (&key (peek-by 0) (only-chars nil only-chars-provided) (max-length nil max-length-provided))
+  "Peek the next non-empty string"
+  (let (found-nonempty result)
+    (loop for skipped-chars = peek-by then (1+ skipped-chars)
+          for current-char = (peek skipped-chars)
+          do (progn
+               (unless (find current-char *skip-chars*)
+                 (unless found-nonempty
+                   (setf found-nonempty t)))
+
+               ;; Exit if the file ended or there's a space after the string has already been found
+               (when (or (null current-char)
+                         (and found-nonempty
+                              (find current-char *skip-chars*))
+                         (and only-chars-provided
+                              found-nonempty
+                              (not (find current-char only-chars)))
+                         (and max-length-provided
+                              (>= (length result) max-length)))
+                 (loop-finish))
+               (unless (find current-char *skip-chars*)
+                 (push current-char result))))
+    (unless (null result)
+      (concatenate 'string (reverse result)))))
+
 (defun peek-ident ()
   "Peek the next identifier or anything that can be considered one (such as keywords)"
   (let ((collected-word
@@ -674,16 +699,28 @@
    (make-operator "+" 4)
    (make-operator "-" 4)
 
+   (make-operator "<" 6)
+   (make-operator "<=" 6)
+   (make-operator ">" 6)
+   (make-operator ">=" 6)
+
+   (make-operator "&&" 11)
+   (make-operator "||" 12)
+
    ;; This isn't really right, but it makes things work
    (make-operator "(" 15)
    (make-operator ")" 15)))
 
 (def-unwindable-parser parse-binary-operator ()
-  (let (result-queue operator-stack)
+  (let ((operator-chars (delete-duplicates
+                         (apply #'concatenate
+                                (append '(vector)
+                                        (mapcar #':name  +binary-operators+)))))
+        result-queue operator-stack)
     (tagbody repeat
-       (let ((next-nonempt (string (peek-nonempty))))
+       (let ((next-nonempt (peek-nonempty-string :only-chars operator-chars)))
          (cond
-           ((equal next-nonempt "(")
+           ((equal (peek-nonempty-string :only-chars "(" :max-length 1) "(")
 
             (push (find "(" +binary-operators+ :key #':name :test #'equal) operator-stack)
 
@@ -691,18 +728,19 @@
             (get)
 
             (go repeat))
-           ((equal next-nonempt ")")
-            (let (match)
+           ((equal (peek-nonempty-string :only-chars ")" :max-length 1) ")")
+
+            (let (matched)
               (loop while (and (not (null operator-stack))
                                (string-not-equal (:name (car operator-stack)) "("))
                     do (progn
                          (push (pop operator-stack) result-queue)
-                         (setf match t)))
-              (unless (and match (car operator-stack) (equal (:name (car operator-stack)) "("))
+                         (setf matched t)))
+              (unless (and matched (car operator-stack) (equal (:name (car operator-stack)) "("))
                 (parsing-error "Mispatched parens"))
               (pop operator-stack)
 
-              (when (and (not match) (null operator-stack))
+              (when (and (not matched) (null operator-stack))
                 (parsing-error "Mismatching parens"))
 
               (skip-empty)
@@ -729,7 +767,7 @@
               (push o1 operator-stack)
 
               (skip-empty)
-              (get)
+              (get (length next-nonempt))
 
               (go repeat)))
            (t
