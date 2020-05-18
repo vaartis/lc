@@ -7,11 +7,9 @@
 (in-package lc.parser)
 
 (defclass parsing-context ()
-  ((inner-string :initarg :string)
-   (position :initarg :position)
-   (symbol :initarg :symbol)
-   (line :initarg :line))
-  (:default-initargs :position 0 :symbol 0 :line 1))
+  ((inner-string :initarg :string :accessor :inner-string)
+   (position :initarg :position :accessor :position))
+  (:default-initargs :position 0))
 
 (defvar *context*)
 
@@ -20,12 +18,6 @@
   (let ((val (peek)))
     (with-slots (position symbol line) *context*
       (incf position advance-by)
-
-      (if (equal val #\Newline)
-          (progn
-            (setf symbol 0)
-            (incf line))
-          (incf symbol))
 
       val)))
 
@@ -105,18 +97,31 @@
 
 (define-condition parsing-error (error)
   ((message :initarg :message)
-   (symbol :initarg :symbol)
-   (line :initarg :line)
    (context :initarg :context))
   (:report (lambda (condition stream)
-             (with-slots (message symbol line context) condition
-               (format stream "~A at line ~A, symbol ~A~%" message line symbol)
-               (let* ((line-specifier (format nil "~A| " line))
-                      (line-specifier-length (length line-specifier)))
-                 (format stream "~A~A~%" line-specifier (get-line-at line context))
-                 ;; Write a ^ showing the position, skipping the first
-                 (loop repeat (1- (+ line-specifier-length symbol)) do (write-char #\Space stream))
-                 (write-char #\^ stream))))))
+             (with-slots (message context) condition
+               ;; Count the symbol and line at position
+               (let ((symbol 0) (line 1))
+                 (with-accessors ((string :inner-string) (position :position)) context
+                   (loop for n from 0 below position
+                         until (>= n (length string))
+                         for curr-char = (aref string n)
+                         do (if (equal curr-char #\Newline)
+                                (progn
+                                  (setf symbol 1)
+                                  (incf line))
+                                (incf symbol))))
+                 (if (>= position (length string))
+                     ;; Put the symbol onto the end
+                     (incf symbol))
+
+                 (format stream "~A at line ~A, symbol ~A~%" message line symbol)
+                 (let* ((line-specifier (format nil "~A| " line))
+                        (line-specifier-length (length line-specifier)))
+                   (format stream "~A~A~%" line-specifier (get-line-at line context))
+                   ;; Write a ^ showing the position, skipping the first
+                   (loop repeat (1- (+ line-specifier-length symbol)) do (write-char #\Space stream))
+                   (write-char #\^ stream)))))))
 
 (defun get-line-at (line-num context)
   (with-slots (inner-string) context
@@ -136,8 +141,6 @@
       (push nil format-args))
     (error 'parsing-error
            :message (apply #'format format-args)
-           :symbol symbol
-           :line line
            :context *context*)))
 
 (defvar +skip-chars+ '(#\Newline #\Space))
