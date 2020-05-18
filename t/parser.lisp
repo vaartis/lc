@@ -17,6 +17,10 @@
          error)
      (format nil "throws ~A" error))))
 
+(defun parses-throw (parse-f strs error)
+  (dolist (str strs)
+    (parse-throws parse-f str error)))
+
 (deftest parse-type-test
   (labels
       ((type-qualifs (parsed-qualifs qualifs)
@@ -72,8 +76,10 @@
         (testing-simple "const long const long volatile const volatile" "int" '(:const :volatile :long-long)))
 
       (testing "conflicting modifiers aren't applied"
-        (parse-throws 'parse-type "const char long short" 'lc.parser:parsing-error)
-        (parse-throws 'parse-type "const char signed unsigned" 'lc.parser:parsing-error)))
+        (parses-throw 'parse-type
+                      '("const char long short"
+                        "const char signed unsigned")
+                      'lc.parser:parsing-error)))
 
     (testing "pointer types are parsed correctly"
       (testing-ptr "char*" '((())
@@ -87,8 +93,9 @@
                      ("int" (:const :long))))
 
       (testing "pointer markers are not allowed on the left of the main type"
-        (parse-throws 'parse-type "* char" 'lc.parser:parsing-error)
-        (parse-throws 'parse-type "char * long" 'lc.parser:parsing-error)))))
+        (parses-throw 'parse-type
+                      '("* char" "char * long")
+                      'lc.parser:parsing-error)))))
 
 (deftest parse-function-call-test
   (labels ((parsed-f-check (str name arg-types)
@@ -108,9 +115,9 @@
     (parsed-f-check "func(1, 2.0)" "func" '(ast-integer ast-float))
     (parsed-f-check "func2()" "func2" nil)
     (testing "invalid calls raise errors"
-      (parse-throws 'parse-function-call "func(" 'parsing-error)
-      (parse-throws 'parse-function-call "func1(1.0," 'parsing-error)
-      (parse-throws 'parse-function-call "func2(1.0" 'parsing-error))))
+      (parses-throw 'parse-function-call
+                      '("func(" "func1(1.0," "func2(1.0")
+                      'parsing-error))))
 
 (deftest parse-binary-operator-test
   (labels ((parsed-op-of-string (str test)
@@ -162,13 +169,9 @@
                                            (argument-values-are second-arg '(2 3))))))
 
     (testing "invalid operators and parens raise errors"
-      (parse-throws 'parse-binary-operator ")" 'parsing-error)
-      (parse-throws 'parse-binary-operator "(" 'parsing-error)
-      (parse-throws 'parse-binary-operator "(1 +" 'parsing-error)
-      (parse-throws 'parse-binary-operator "1 + 1)" 'parsing-error)
-      (parse-throws 'parse-binary-operator "1 + 1 * 2)" 'parsing-error)
-      (parse-throws 'parse-binary-operator "((1 + 1 * 2)" 'parsing-error)
-      (parse-throws 'parse-binary-operator "((1 + 1) * 2))" 'parsing-error))))
+      (parses-throw 'parse-binary-operator
+                      '(")" "(" "(1 +" "1 + 1)" "1 + 1 * 2)" "((1 + 1 * 2)" "((1 + 1) * 2))")
+                      'parsing-error))))
 
 (deftest parse-if-else-test
   (labels ((parsed-if-else (str cond-val if-val &optional else-val)
@@ -196,10 +199,7 @@
     (parsed-if-else "if (1) { 2; 3; } else { 3; 4; }" 1 '(2 3) '(3 4))
 
     (testing "invalid if statements raise errors"
-      (parse-throws 'parse-if-else "if (" 'parsing-error)
-      (parse-throws 'parse-if-else "if ()" 'parsing-error)
-      (parse-throws 'parse-if-else "if (1) {" 'parsing-error)
-      (parse-throws 'parse-if-else "if (1) { else" 'parsing-error)
-      (parse-throws 'parse-if-else "if ) { else }" 'parsing-error)
-      (parse-throws 'parse-if-else "if (1) { else }" 'parsing-error)
-      (parse-throws 'parse-if-else "if (1) { 2 } else { 3 }" 'parsing-error))))
+      (parses-throw 'parse-if-else
+                    '("if (" "if ()" "if (1) {" "if (1) { else" "if ) { else }"
+                      "if (1) { else }" "if (1) { 2 } else { 3 }")
+                    'parsing-error))))
